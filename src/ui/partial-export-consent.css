@@ -1,0 +1,7 @@
+.partial-export-body { display: grid; gap: 16px; font-size: 14px; }
+.partial-export-warning { padding: 14px 16px; border: 1px solid #6d573b; border-radius: 12px; background: #302b26; color: var(--color-warning); }
+.partial-export-body > .button { justify-self: start; }
+.partial-export-actions { flex-wrap: wrap; gap: 10px; }
+@media (max-width: 620px) {
+  .partial-export-actions .button, .partial-export-body > .button { width: 100%; }
+}

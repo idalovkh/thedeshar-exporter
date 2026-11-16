@@ -1,0 +1,15 @@
+{
+  "name": "exporter",
+  "private": true,
+  "version": "0.3.44",
+  "type": "module",
+  "description": "Standalone Manifest V3 material export extension",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

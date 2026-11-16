@@ -1,0 +1,70 @@
+.header-actions { display: flex; align-items: center; gap: 24px; }
+body:has(.help-dialog[open]) { overflow: hidden; }
+.help-dialog {
+  width: min(680px, calc(100% - 40px));
+  max-height: min(860px, calc(100dvh - 48px));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #3c5273;
+  border-radius: 22px;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  box-shadow: 0 32px 100px #020714b3;
+}
+.help-dialog[open] { display: flex; flex-direction: column; }
+.help-dialog::backdrop { background: #030915c4; backdrop-filter: blur(6px); }
+.help-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex: none; padding: 24px 28px; border-bottom: 1px solid var(--color-line); background: linear-gradient(135deg, #1a2d4b, var(--color-surface)); }
+.help-header h2 { font-size: 25px; }
+.help-header h2:focus { outline: none; }
+.help-eyebrow { margin-bottom: 6px; color: #98b6e3; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; }
+.help-dialog form { margin: 0; }
+.help-close { min-width: 44px; min-height: 44px; padding: 10px; }
+.help-body { min-height: 0; padding: 24px 28px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #405b83 transparent; }
+.help-intro { margin-bottom: 24px; color: var(--color-muted); font-size: 14px; }
+.help-steps { display: grid; gap: 22px; padding: 0; margin: 0; list-style: none; }
+.help-steps > li { display: flex; align-items: flex-start; gap: 16px; }
+.help-steps > li > div { min-width: 0; }
+.help-step-icon { display: grid; place-items: center; flex: none; width: 40px; height: 40px; border: 1px solid #3c5980; border-radius: 12px; color: #b1cfff; background: #1b3455; }
+.help-steps h3 { margin: 0 0 6px; font-size: 16px; line-height: 1.35; text-wrap: initial; }
+.help-steps p, .help-topic-body { color: var(--color-muted); font-size: 14px; line-height: 1.65; }
+.help-note { display: flex; gap: 10px; margin-top: 24px; padding: 14px 16px; border: 1px solid #385477; border-radius: 12px; background: #172b46; color: #bdcfe9; font-size: 13px; line-height: 1.6; }
+.help-note .icon { width: 18px; height: 18px; margin-top: 1px; }
+.help-note p { min-width: 0; }
+.help-note strong { color: var(--color-ink); font-weight: 700; }
+.help-topics { margin-top: 24px; border-top: 1px solid var(--color-line); }
+.help-topics details { border-bottom: 1px solid var(--color-line); }
+.help-topics summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 52px; padding: 14px 4px; cursor: pointer; list-style: none; color: #dae7fb; font-size: 14px; font-weight: 700; }
+.help-topics summary::-webkit-details-marker { display: none; }
+.help-topics summary::after { content: ''; width: 7px; height: 7px; flex: none; margin-right: 4px; border-right: 1.5px solid #a4c7ff; border-bottom: 1.5px solid #a4c7ff; transform: rotate(45deg); }
+.help-topics details[open] > summary::after { transform: rotate(225deg); }
+.help-topics summary:hover { color: #a4c7ff; }
+.help-topics summary:focus-visible { outline: 3px solid #a4c7ff; outline-offset: -3px; border-radius: 8px; }
+.help-topic-body { padding: 0 4px 18px; }
+.help-topic-body ol { margin: 12px 0; padding-left: 22px; }
+.help-topic-body li + li { margin-top: 8px; }
+.help-topic-body .help-warning { color: var(--color-warning); }
+.help-topic-body code { color: #c5dbff; font-size: 12px; overflow-wrap: anywhere; }
+.help-footer { display: flex; justify-content: flex-end; flex: none; padding: 16px 28px; border-top: 1px solid var(--color-line); background: #122039; }
+.help-footer .button { min-width: 120px; }
+@media (max-width: 620px) {
+  .app-header { gap: 12px; }
+  .header-actions { min-width: 0; }
+  .header-actions .header-label { display: none; }
+  .help-dialog { width: calc(100% - 24px); max-height: calc(100dvh - 24px); border-radius: 18px; }
+  .help-header { gap: 12px; padding: 20px; }
+  .help-header h2 { font-size: 22px; }
+  .help-body { padding: 20px; }
+  .help-steps { gap: 20px; }
+  .help-steps > li { gap: 12px; }
+  .help-step-icon { width: 32px; height: 36px; border-radius: 10px; }
+  .help-step-icon .icon { width: 18px; height: 18px; }
+  .help-footer { padding: 14px 20px; }
+  .help-footer form, .help-footer .button { width: 100%; }
+}
+@media (max-width: 380px) {
+  #open-help { gap: 6px; padding-inline: 9px; font-size: 12px; }
+  #open-help > .icon { display: none; }
+  .help-header, .help-body { padding: 16px; }
+  .help-steps > li { gap: 10px; }
+}

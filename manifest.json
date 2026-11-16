@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "exporter",
+  "short_name": "exporter",
+  "version": "0.3.44",
+  "minimum_chrome_version": "119",
+  "description": "Экспорт учебных материалов в ZIP для переноса между платформами.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "unlimitedStorage",
+    "system.memory",
+    "system.cpu",
+    "webNavigation",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://platform.desharschool.ru/*",
+    "https://progressme.ru/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "icons": {
+    "16": "src/ui/icons/icon-16.png",
+    "32": "src/ui/icons/icon-32.png",
+    "48": "src/ui/icons/icon-48.png",
+    "128": "src/ui/icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "exporter",
+    "default_icon": {
+      "16": "src/ui/icons/icon-16.png",
+      "32": "src/ui/icons/icon-32.png",
+      "48": "src/ui/icons/icon-48.png",
+      "128": "src/ui/icons/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://platform.desharschool.ru/*",
+        "https://progressme.ru/*"
+      ],
+      "js": [
+        "src/capture/hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://platform.desharschool.ru/*",
+        "https://progressme.ru/*"
+      ],
+      "js": [
+        "src/capture/source-binding.js",
+        "src/capture/navigation.js",
+        "src/capture/section-visit.js",
+        "src/capture/content.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  }
+}

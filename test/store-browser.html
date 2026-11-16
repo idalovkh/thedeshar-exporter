@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<title>Проверка локального хранилища</title>
+<style>body{max-width:850px;margin:36px auto;padding:0 20px;font:17px/1.55 system-ui;color:#193342}h1{font-size:25px}pre{white-space:pre-wrap}li{margin:8px 0}</style>
+<h1>Проверка IndexedDB в браузере</h1>
+<p id="status">Выполняются проверки…</p>
+<ol id="results"></ol>
+<pre id="failure"></pre>
+<script type="module">
+import { runStoreChecks } from './store-checks.js';
+import { runExportStoreChecks } from './export-store-checks.js';
+const databaseName = `exporter-storage-audit-${crypto.randomUUID()}`;
+try {
+  const passed = await runStoreChecks(indexedDB, databaseName);
+  const exportChecks = await runExportStoreChecks(indexedDB, `${databaseName}-export`);
+  passed.push(`Потоковый экспорт: ${exportChecks} проверок чтения и записи без загрузки всей книги`);
+  document.querySelector('#results').replaceChildren(...passed.map(text => { const li = document.createElement('li'); li.textContent = text; return li; }));
+  document.querySelector('#status').textContent = `Успешно: ${passed.length} проверок настоящей IndexedDB.`;
+} catch (error) {
+  document.querySelector('#status').textContent = 'Ошибка проверки IndexedDB';
+  document.querySelector('#failure').textContent = error.stack || error.message;
+} finally {
+  // This name is generated only for this fixture run; never delete app storage.
+  await new Promise((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(databaseName);
+    request.onsuccess = resolve;
+    request.onerror = () => reject(request.error);
+  });
+  indexedDB.deleteDatabase(`${databaseName}-export`);
+}
+</script>
+</html>

@@ -1,0 +1,4 @@
+export const TRANSITION_TIMEOUT_MS = 180_000;
+export const MAX_TRANSITION_ATTEMPTS = 3;
+export const TRANSITION_RETRY_AFTER_MS = 60_000;
+export const TRANSITION_RETRY_DELAYS_MS = Object.freeze([2_000, 5_000]);

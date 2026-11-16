@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#080f1e">
+    <title>exporter</title>
+    <link rel="icon" type="image/svg+xml" href="src/ui/icons/exporter.svg">
+    <link rel="stylesheet" href="src/ui/fonts.css">
+    <link rel="stylesheet" href="src/ui/exporter.css">
+    <link rel="stylesheet" href="src/ui/help.css">
+    <link rel="stylesheet" href="src/ui/partial-export-consent.css">
+    <script type="module" src="src/ui/help.js"></script>
+    <script type="module" src="src/ui/exporter.js"></script>
+  </head>
+  <body>
+    <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+      <symbol id="icon-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 3H20v19H6.5A2.5 2.5 0 0 1 4 19.5v-14A2.5 2.5 0 0 1 6.5 3Z"/><path d="M8 7h8M8 11h5"/></symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></symbol>
+      <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 16v5h14v-5"/></symbol>
+      <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.01"/></symbol>
+      <symbol id="icon-device" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></symbol>
+      <symbol id="icon-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 4.3 1.7c-1 .7-1.8 1.2-1.8 2.8m0 3v.01"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+      <symbol id="icon-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></symbol>
+    </defs></svg>
+    <header class="app-header">
+      <span class="app-name"><span class="app-icon"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg></span>exporter</span>
+      <div class="header-actions">
+        <span class="header-label">Книга <span aria-hidden="true">→</span> ZIP</span>
+        <button id="open-help" class="button button-small button-quiet" type="button" aria-haspopup="dialog" aria-controls="help-dialog"><svg class="icon" aria-hidden="true"><use href="#icon-help"/></svg>Как пользоваться</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <div class="page-heading">
+        <h1>Перенос книги</h1>
+        <p>Соберите материалы книги, затем скачайте архив для импорта.</p>
+      </div>
+      <ol class="steps" aria-label="Шаги переноса">
+        <li id="step-open"><span class="step-number" aria-hidden="true">1</span><span>Откройте книгу</span></li>
+        <li id="step-collect"><span class="step-number" aria-hidden="true">2</span><span>Соберите материалы</span></li>
+        <li id="step-download"><span class="step-number" aria-hidden="true">3</span><span>Скачайте архив</span></li>
+      </ol>
+
+      <section class="panel" aria-label="Перенос книги">
+        <div class="source-row">
+          <div class="source-heading">
+            <span class="source-icon"><svg class="icon" aria-hidden="true"><use href="#icon-book"/></svg></span>
+            <div class="source-description"><p class="label">Ваша книга</p><h2 id="source-name" aria-busy="true">Книга</h2><p id="source-meta" class="source-meta">Подключение к учебной платформе</p></div>
+          </div>
+        </div>
+        <div id="collection-body" class="collection-body" aria-busy="true">
+          <span id="capture-status" class="status-badge">Книга</span>
+          <h2 id="collection-title">Подключение к книге</h2>
+          <p id="collection-status" class="hint">Сейчас появится название открытой книги.</p>
+          <p id="pending-status" class="sr-only" role="status" aria-live="polite">Подключение к книге</p>
+          <div id="connection-progress" class="connection-progress" aria-hidden="true"><span class="loading-spinner"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"/></svg></span></div>
+          <div id="work-progress" class="work-progress" hidden>
+            <div id="progress" class="loading-spinner" role="progressbar" aria-label="Сбор материалов" aria-valuemin="0" aria-valuemax="100"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9"/></svg><span id="progress-percent" aria-hidden="true" hidden></span></div>
+            <div class="progress-copy"><div class="progress-heading"><span id="progress-title">Материалы книги</span><strong id="progress-count"></strong></div><p id="progress-detail" class="hint"></p></div>
+          </div>
+          <p id="result-summary" class="result-summary" hidden></p>
+          <div id="review-notice" class="review-notice" hidden><svg class="icon" aria-hidden="true"><use href="#icon-info"/></svg><p id="review-text"></p></div>
+          <div id="message" class="message" role="status" aria-live="polite" hidden></div>
+          <div id="missing-files" class="missing-files" hidden><h3>Проблемные файлы</h3><p class="hint">После переноса проверьте упражнения, которым нужны эти файлы.</p><ul id="file-results"></ul><p id="more-files" class="hint" hidden></p></div>
+
+          <div class="actions">
+            <button id="export" class="button button-primary" type="button" hidden><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg><span id="export-label">Скачать архив</span></button>
+            <button id="collect-book" class="button button-primary" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#icon-book"/></svg><span id="collect-label">Собрать книгу</span></button>
+            <button id="cancel-collection" class="button button-secondary" type="button" hidden>Остановить сбор</button>
+            <button id="cancel" class="button button-secondary" type="button" hidden>Отменить скачивание</button>
+            <button id="download-diagnostics" class="button button-secondary" type="button" hidden>Скачать отчёт о проблеме</button>
+          </div>
+          <p id="action-hint" class="action-hint">Уроки, разделы и домашние задания соберём по порядку.</p>
+
+        </div>
+      </section>
+      <p class="footer"><svg class="icon" aria-hidden="true"><use href="#icon-device"/></svg><span>Материалы сохраняются на ваш компьютер.<br>Исходная книга останется без изменений.</span></p>
+    </main>
+
+    <dialog id="partial-export-dialog" class="help-dialog partial-export-dialog" aria-labelledby="partial-export-title" aria-describedby="partial-export-summary partial-export-risk">
+      <header class="help-header"><h2 id="partial-export-title">Перед скачиванием</h2></header>
+      <div class="help-body partial-export-body">
+        <p id="partial-export-summary">Не все файлы удалось получить из исходной книги. Архив сохранится без них.</p>
+        <p id="partial-export-risk" class="partial-export-warning">После переноса рекомендуем проверить книгу.</p>
+        <p>Сообщите нам о проблеме — поможем разобраться.</p>
+        <button id="partial-export-report" class="button button-secondary" type="button">Скачать отчёт о проблеме</button>
+        <p id="partial-export-feedback" class="hint" role="status" hidden></p>
+      </div>
+      <footer class="help-footer partial-export-actions">
+        <button id="partial-export-cancel" class="button button-secondary" type="button" autofocus>Отмена</button>
+        <button id="partial-export-accept" class="button button-primary" type="button">Скачать</button>
+      </footer>
+    </dialog>
+
+    <dialog id="help-dialog" class="help-dialog" aria-labelledby="help-title">
+      <header class="help-header">
+        <div><p class="help-eyebrow">От книги к архиву</p><h2 id="help-title" tabindex="-1" autofocus>Как пользоваться</h2></div>
+        <form method="dialog"><button class="button button-secondary help-close" type="submit" data-close-help aria-label="Закрыть инструкцию"><svg class="icon" aria-hidden="true"><use href="#icon-close"/></svg></button></form>
+      </header>
+      <div class="help-body">
+        <p class="help-intro">Четыре шага для переноса учебных материалов.</p>
+        <ol class="help-steps" aria-label="Шаги переноса книги">
+          <li>
+            <span class="help-step-icon"><svg class="icon" aria-hidden="true"><use href="#icon-book"/></svg></span>
+            <div><h3>1. Откройте книгу</h3><p>Откройте содержание книги на учебной платформе. Подойдёт и совместимый сайт вашей школы с собственным адресом. При первом подключении разрешите exporter доступ к этому сайту.</p><p><strong>После установки или обновления расширения закройте старую страницу exporter и обновите вкладку книги.</strong> Это подключит расширение к странице. Дождитесь загрузки книги, затем нажмите значок exporter в её вкладке.</p></div>
+          </li>
+          <li>
+            <span class="help-step-icon"><svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg></span>
+            <div><h3>2. Соберите материалы</h3><p>Проверьте название книги и нажмите «Собрать книгу». Оставьте вкладки книги и экспортера открытыми и не переключайте страницы книги до завершения.</p></div>
+          </li>
+          <li>
+            <span class="help-step-icon"><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg></span>
+            <div><h3>3. Скачайте архив</h3><p>После завершения нажмите «Скачать архив» и выберите место сохранения ZIP. Если Chrome сначала запросит доступ к файлам книги, разрешите его и нажмите «Скачать архив» ещё раз. При одном-двух недоступных файлах можно отменить скачивание или сохранить архив с замечаниями. Если пропусков больше, появится ошибка. Скачайте отчёт о проблеме и пришлите нам — поможем разобраться. Дождитесь сообщения «Архив сохранён».</p></div>
+          </li>
+          <li>
+            <span class="help-step-icon"><svg class="icon" aria-hidden="true"><use href="#icon-arrow"/></svg></span>
+            <div><h3>4. Перенесите книгу</h3><p>Откройте импорт материалов на нужной платформе и выберите ZIP с книгой. После переноса проверьте упражнения и правильные ответы. Для следующей книги откройте её содержание на учебной платформе и снова нажмите значок exporter. Откроется отдельная страница для этой книги.</p></div>
+          </li>
+        </ol>
+        <div class="help-note"><svg class="icon" aria-hidden="true"><use href="#icon-info"/></svg><p>Для импорта нужен <strong>архив с книгой</strong>. Установочный ZIP расширения для этого не подходит.</p></div>
+        <div class="help-topic-body help-next-books">
+          <p>Каждая страница exporter закреплена за своей книгой. Предыдущий сбор остаётся на его странице; повторное нажатие значка на той же книге возвращает к нему. Скачайте нужные архивы до закрытия Chrome.</p>
+          <p>Книги можно собирать одновременно в разных вкладках учебной платформы. Скачивание файлов и подготовка изображений выполняются по очереди: если другая книга ещё обрабатывается, exporter покажет ожидание.</p>
+        </div>
+        <div class="help-topics">
+          <details>
+            <summary>Если сбор остановился</summary>
+            <div class="help-topic-body">
+              <p>При медленном соединении exporter ждёт загрузку страницы до трёх минут и при подтверждённом сбое делает до двух повторов. Не обновляйте вкладку книги вручную во время сбора: это прервёт переход.</p>
+              <p>Если страница была повторно перезагружена или её состояние не удалось подтвердить, начните сбор заново. Сообщение об остановке объяснит причину; подробности перехода сохранятся в отчёте.</p>
+              <p>Если загрузка не удалась, сохранённые страницы остаются в расширении. Чтобы скачать архив, нужно завершить сбор всей книги.</p>
+              <ol>
+                <li>Проверьте сообщение об ошибке. Если вкладка с книгой закрыта, откройте книгу повторно. Если она не отвечает, обновите её.</li>
+                <li>Закройте старую страницу экспортера и нажмите значок exporter во вкладке книги, затем повторите сбор на новой странице.</li>
+                <li>Если ошибка повторяется, нажмите «Скачать отчёт о проблеме». Сведения о подключении, сборе, файлах и создании ZIP сохранятся отдельно от книги.</li>
+              </ol>
+              <p>Кнопка отчёта появляется после ошибки или сохранения архива с пропусками. Во время работы, после полного успеха и ручной отмены она скрыта. Отправьте скачанный JSON в поддержку самостоятельно; содержимое заданий и данные входа в него не включаются.</p>
+            </div>
+          </details>
+          <details>
+            <summary>Как обновить расширение</summary>
+            <div class="help-topic-body">
+              <p class="help-warning">Сначала завершите сбор и сохраните ZIP книги на компьютер. Несохранённый сбор может стать недоступен после перезагрузки расширения.</p>
+              <ol>
+                <li>Скачайте новую сборку расширения там, где получили его, и закройте вкладку экспортера.</li>
+                <li>Полностью замените файлы в прежней папке расширения, сохранив её путь.</li>
+                <li>Откройте <code>chrome://extensions</code> и нажмите значок перезагрузки на карточке exporter.</li>
+                <li>Обновите вкладку книги, чтобы подключить новую версию расширения. Дождитесь загрузки и снова нажмите значок exporter в этой вкладке.</li>
+              </ol>
+              <p>Скачивание новой сборки само по себе не обновляет установленное расширение.</p>
+            </div>
+          </details>
+        </div>
+      </div>
+      <footer class="help-footer"><form method="dialog"><button class="button button-primary" type="submit" data-close-help>Понятно</button></form></footer>
+    </dialog>
+  </body>
+</html>

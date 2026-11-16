@@ -1,0 +1,32 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>Workspace migration checks</title><body><pre id="result">Running…</pre><script type="module">
+import { createWorkspaceStore } from '../src/lib/store.js';
+import { createBookWorkspaces } from '../src/lib/book-workspaces.js';
+const result = document.querySelector('#result');
+const databaseName = `exporter-catalogue-check-${crypto.randomUUID()}`;
+const values = {};
+const storage = { get: async key => ({ [key]: structuredClone(values[key]) }), set: async value => Object.assign(values, structuredClone(value)) };
+const store = createWorkspaceStore({ sessionStorage: storage, databaseName });
+const url = id => `https://progressme.ru/cabinet/school/materials/book/${id}/content`;
+const checks = [];
+const assert = (value, label) => { if (!value) throw new Error(label); checks.push(label); };
+try {
+  await store.updateWorkspace(7, previous => ({ ...previous, collection: { title: 'Original book', rootUrl: url(71), status: 'finished' }, snapshots: [{ title: 'Original book', url: url(71), blocks: [{ text: 'Keep original content' }] }], captures: [{ data: { original: true } }] }));
+  const catalogue = createBookWorkspaces({ storage, listLegacy: store.listWorkspaceMetadata });
+  const entries = await catalogue.list();
+  assert(entries.length === 1, 'Legacy dataset adopted');
+  assert(entries[0].storageId === 7, 'Original physical key preserved');
+  assert(entries[0].book.title === 'Original book', 'Original title preserved');
+  const second = await catalogue.resolve({ sourceTabId: 7, url: url(81) });
+  assert(second.workspaceId !== entries[0].workspaceId, 'Second book independent in same source tab');
+  assert((await store.readWorkspace(second.storageId)).snapshots.length === 0, 'New book starts empty');
+  await store.resetWorkspace(second.storageId, { book: second.book });
+  const original = await store.readWorkspace(entries[0].storageId);
+  assert(original.snapshots[0].blocks[0].text === 'Keep original content' && original.captures[0].data.original, 'Reset second retains complete original records');
+  const reopenedStore = createWorkspaceStore({ sessionStorage: storage, databaseName });
+  const reopened = createBookWorkspaces({ storage, listLegacy: reopenedStore.listWorkspaceMetadata });
+  assert((await reopened.list()).length === 2, 'Catalogue survives worker restart');
+  assert((await reopenedStore.readWorkspace(7)).captures[0].data.original, 'Records survive fresh IndexedDB connection');
+  result.textContent = `PASS ${checks.length}\n${checks.join('\n')}`;
+  document.documentElement.dataset.result = 'pass';
+} catch (error) { result.textContent = error.stack; document.documentElement.dataset.result = 'fail'; }
+</script></body></html>
