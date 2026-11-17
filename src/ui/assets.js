@@ -5,6 +5,7 @@ import { snapshotBookCover } from "../lib/book-cover.js";
 import { detectedFormat, emitMediaDiagnostic, inspectRejectedMediaResponse, mediaDiagnosticError } from "../lib/media-response-diagnostics.js";
 import { buildMediaRequestUrls } from "../lib/media-request-urls.js";
 import { createPngStreamValidator } from "../lib/png-stream-validator.js";
+import { normalizePngSource } from "../lib/normalize-png-source.js";
 import { hashArchiveMedia } from "../lib/media-sha256.js";
 
 export const MAX_MEDIA_BYTES = 100 * 1024 * 1024;
@@ -86,7 +87,10 @@ function captureMediaBase(capture) {
 export function collectAssets(snapshots = [], captures = []) {
   const found = new Map();
   const add = (value, metadata = {}, base, sourcePage = isSourceUrl(base) ? base : undefined) => {
-    if (typeof value !== "string" || !value.trim()) return;
+    if (typeof value !== "string") return;
+    const trimmed = value.trim();
+    // URL resolution would turn raw markup such as a player iframe into a relative file path.
+    if (!trimmed || trimmed.startsWith("<")) return;
     let absolute;
     try { absolute = new URL(value, base).href; } catch { return; }
     if (isEmbeddedResource(absolute)) return;
@@ -197,7 +201,7 @@ export async function readMediaResponse(response, { signal, maxBytes = MAX_MEDIA
   const reader = response.body.getReader();
   // Some source images are sent as text/plain. Their bytes must pass the full
   // container check before their effective MIME can change; a prefix is insufficient.
-  const pngValidator = provisionalPng ? createPngStreamValidator({ maxBytes }) : null;
+  const pngValidator = provisionalPng ? createPngStreamValidator({ maxBytes, allowTrailing: true }) : null;
   const diagnosticPrefix = provisionalPng && diagnostic ? new Uint8Array(1024) : null;
   let prefixBytes = 0;
   const chunks = [], blobParts = [];
@@ -386,13 +390,14 @@ export async function downloadMediaAssets(candidates, {
         clearTimeout(timeout);
         active.delete(index);
         check();
+        file = await normalizePngSource(file, details);
         let converted = false;
         if (optimizeMedia) {
           encoding++;
           report();
           try {
             const selected = await optimizeMedia(file, { signal: operation.signal, index });
-            converted = selected !== file;
+            converted = selected.mimeType === 'image/webp' && (selected.mimeType !== file.mimeType || selected.data !== file.data);
             file = selected;
           } finally { encoding--; }
           check();

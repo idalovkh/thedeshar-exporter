@@ -35,11 +35,11 @@ test('new section snapshots coexist, while revisiting a section replaces its old
   assert.throws(() => appendSnapshot(state, { ...snapshot, url: 'https://other.example/' }));
 });
 
-test('credential fields are scrubbed before local persistence; material answers survive', () => {
+test('capture bodies retain source fields locally until archive preparation; material answers survive', () => {
   const state = createWorkspace(7);
   appendCapture(state, { kind: 'fetch', url: 'https://example.org/lessons/1?token=secret', data: { exercises: [{ correctAnswers: ['a'] }], accessToken: 'private', user: { email: 'private@example.org' } } });
   const persisted = JSON.stringify(state);
-  assert.equal(persisted.includes('private@example.org'), false);
+  assert.equal(persisted.includes('private@example.org'), true);
   assert.equal(persisted.includes('secret'), false);
   assert.deepEqual(state.captures[0].data.exercises[0].correctAnswers, ['a']);
 });

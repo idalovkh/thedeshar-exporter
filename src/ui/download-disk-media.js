@@ -2,12 +2,13 @@ import { readMediaResponse, MAX_MEDIA_BYTES } from './assets.js';
 import { buildMediaRequestUrls } from '../lib/media-request-urls.js';
 import { createExportResources } from '../lib/export-resources.js';
 import { createWebpOptimizer } from '../lib/webp-optimizer.js';
-import { inspectRasterImage } from '../lib/raster-image-metadata.js';
+import { inspectRasterImage, rasterImageSource } from '../lib/raster-image-metadata.js';
 import { acceptsImportOriginal } from '../lib/import-original-admission.js';
 import { hashArchiveMedia } from '../lib/media-sha256.js';
 import { archiveSizeError } from '../lib/archive.js';
 import { safeFilename } from '../lib/security.js';
 import { emitMediaDiagnostic } from '../lib/media-response-diagnostics.js';
+import { strongMediaEtag } from '../lib/prepared-media-cache.js';
 
 const FATAL = new Set(['storage_error', 'storage_unavailable', 'export_resources', 'archive_limit', 'incomplete_export']);
 const IO_BYTES = 1024 * 1024;
@@ -42,7 +43,7 @@ function retryAfter(milliseconds, signal) {
 export async function downloadDiskMedia(candidates, { spool, signal, resources: suppliedResources,
   maxFileBytes = MAX_MEDIA_BYTES, maxTotalBytes = Infinity, timeoutMs = 45000, retryDelayMs = 300,
   fetchFile = globalThis.fetch, hasPermission = async () => true, onProgress, onDiagnostic, onCodecFailure,
-  allowCodec = true, createOptimizer = options => createWebpOptimizer(options) } = {}) {
+  allowCodec = true, mediaCache, createOptimizer = options => createWebpOptimizer(options) } = {}) {
   const operation = new AbortController();
   const abort = () => operation.abort();
   signal?.addEventListener('abort', abort, { once: true });
@@ -54,14 +55,22 @@ export async function downloadDiskMedia(candidates, { spool, signal, resources: 
   const queue = readyQueue(operation.signal), results = new Array(candidates.length);
   const requests = buildMediaRequestUrls(candidates), groupsByURL = new Map(), permission = new Map();
   const active = new Map(), sources = new Map(), outputs = new Map();
-  let next = 0, completed = 0, missing = 0, transferred = 0, retained = 0, encoding = 0, originalImages = 0;
+  let next = 0, completed = 0, missing = 0, transferred = 0, retained = 0, encoding = 0, originalImages = 0, cacheHits = 0, cacheReused = 0;
   const check = () => {
     if (fatal) throw fatal;
-    if (missing > 2) throw Object.assign(new Error('Не удалось получить больше двух файлов книги. Архив не создан. Скачайте отчёт и пришлите нам — поможем разобраться.'), { code: 'incomplete_export' });
     operation.signal.throwIfAborted(); resources.check?.();
   };
-  const report = () => onProgress?.({ completed, total: candidates.length, loadedBytes: transferred,
-    retainedBytes: retained, active: [...active.values()], encoding, originalImages });
+  const report = () => onProgress?.({ completed, total: candidates.length, loadedBytes: transferred, missingFiles: missing,
+    retainedBytes: retained, active: [...active.values()], encoding, originalImages, cacheHits, cacheReused });
+  const cached = async (method, ...arguments_) => {
+    try { return await mediaCache?.[method]?.(...arguments_); }
+    catch (error) {
+      check();
+      // Writes into the actual attempt spool retain their existing fatal behavior.
+      if (error.code === 'storage_error') throw error;
+      return null;
+    }
+  };
   const diagnose = (asset, url, status, details = {}) => emitMediaDiagnostic(onDiagnostic, {
     assetId: asset.id, url, sourcePage: asset.sourcePage, status, ...details,
   });
@@ -104,6 +113,7 @@ export async function downloadDiskMedia(candidates, { spool, signal, resources: 
     }
     const release = await resources.acquireDownload();
     try {
+      let previous = await cached('lookup', group.url);
       for (let attempt = 1; attempt <= 3; attempt++) {
         check();
         const controller = new AbortController(), abortFile = () => controller.abort();
@@ -115,7 +125,25 @@ export async function downloadDiskMedia(candidates, { spool, signal, resources: 
         diagnose(asset, group.url, 'started', details);
         active.set(first, { name: asset.name, loaded: 0, total: undefined }); report();
         try {
-          const response = await fetchFile(group.url, { credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store', signal: controller.signal });
+          const etag = strongMediaEtag(previous?.etag);
+          const request = { credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store', signal: controller.signal };
+          let response = await fetchFile(group.url, { ...request, ...(etag ? { headers: { 'If-None-Match': etag } } : {}) });
+          if (response.status === 304 && etag) {
+            if (previous.sourceSize > maxFileBytes) throw Object.assign(new Error('Превышен лимит размера файла.'), { reason: 'file_limit' });
+            const prepared = await cached('restore', previous, spool, group.name, { signal: operation.signal, onWrite: ms => resources.recordWrite?.(ms) });
+            if (prepared) {
+              group.prepared = prepared;
+              group.source = { hash: previous.sourceHash, size: previous.sourceSize, etag };
+              group.details = { ...details, httpStatus: 304, elapsedMs: Math.round(performance.now() - started) };
+              cacheHits++; report();
+              return group;
+            }
+            // A 304 cannot repair missing or corrupt local bytes. Fetch the full source once.
+            await response.body?.cancel().catch(() => {});
+            previous = null;
+            response = await fetchFile(group.url, request);
+          }
+          group.etag = strongMediaEtag(response.headers.get('etag'));
           details.httpStatus = response.status;
           details.mimeType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
           const declared = response.headers.get('content-length')?.trim() || '';
@@ -172,19 +200,38 @@ export async function downloadDiskMedia(candidates, { spool, signal, resources: 
     } catch (error) { try { await writer.abort(); } catch { /* Keep the real failure. */ } throw error; }
   }
   async function prepare(group) {
-    let file;
-    try { file = { data: await spool.file(group.name), mimeType: group.mimeType }; }
+    let file = group.prepared?.file;
+    try { file ||= { data: await spool.file(group.name), mimeType: group.mimeType }; }
     catch (error) { throw Object.assign(error, { code: error.code || 'storage_error' }); }
     let sourceKey;
-    try { sourceKey = `${file.data.size}:${await hashArchiveMedia(file.data, operation.signal)}`; }
+    try {
+      group.source ||= { hash: await hashArchiveMedia(file.data, operation.signal), size: file.data.size, etag: group.etag };
+      sourceKey = `${group.source.size}:${group.source.hash}`;
+    }
     catch (error) { throw Object.assign(error, { code: error.code || 'storage_error' }); }
-    if (sources.has(sourceKey)) { await spool.remove(group.name); return sources.get(sourceKey); }
+    if (sources.has(sourceKey)) {
+      const prepared = sources.get(sourceKey);
+      await spool.remove(group.name);
+      await cached('put', group.url, group.source, prepared, { signal: operation.signal, onWrite: ms => resources.recordWrite?.(ms) });
+      return prepared;
+    }
+    if (!group.prepared) {
+      group.prepared = await cached('restoreSource', group.source.hash, group.source.size, spool, group.name,
+        { signal: operation.signal, onWrite: ms => resources.recordWrite?.(ms) });
+      if (group.prepared) { file = group.prepared.file; cacheReused++; report(); }
+    }
     let metadata;
-    try { metadata = await inspectRasterImage(file.data, file.mimeType); }
+    try { if (!group.prepared) metadata = await inspectRasterImage(file.data, file.mimeType); }
     catch (error) { if (!error.reason) error.code ||= 'storage_error'; throw error; }
-    let converted = false, originalImage = false;
+    let converted = group.prepared?.converted || false, originalImage = group.prepared?.originalImage || false;
     let storedName = group.name;
     if (metadata) {
+      if (metadata.pngBytes) {
+        group.details = { ...group.details, normalization: 'png_trailing_bytes_removed', removedBytes: file.data.size - metadata.pngBytes };
+        file = { ...file, data: await persistOutput(`normalized-${group.indices[0]}.png`, rasterImageSource(file.data, metadata)), mimeType: metadata.mimeType };
+        storedName = `normalized-${group.indices[0]}.png`;
+        await spool.remove(group.name);
+      }
       if (!allowCodec || !await resources.admitImage(metadata, file.data.size)) {
         let accepted;
         try { accepted = await acceptsImportOriginal(file.data, metadata); }
@@ -204,8 +251,8 @@ export async function downloadDiskMedia(candidates, { spool, signal, resources: 
           else {
             const name = `prepared-${group.indices[0]}.webp`;
             file = { ...selected, data: await persistOutput(name, selected.data) };
+            await spool.remove(storedName);
             storedName = name;
-            await spool.remove(group.name);
           }
         } finally { encoding--; report(); }
       }
@@ -220,6 +267,7 @@ export async function downloadDiskMedia(candidates, { spool, signal, resources: 
     }
     const prepared = { file, converted, originalImage };
     sources.set(sourceKey, prepared);
+    await cached('put', group.url, group.source, prepared, { signal: operation.signal, onWrite: ms => resources.recordWrite?.(ms) });
     return prepared;
   }
   async function prepareWorker() {

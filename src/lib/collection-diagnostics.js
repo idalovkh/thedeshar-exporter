@@ -12,7 +12,7 @@ const REASONS = new Set(['section_loading_timeout', 'section_render_timeout', 'n
   'navigation_blocked', 'snapshot_error', 'author_data_missing', 'author_data_incomplete', 'interrupted',
   'operation_failed', 'section_list_changed', 'document_load_timeout', 'navigation_stale', 'cancelled',
   'source_loading', 'source_network_error', 'source_security_error', 'source_interrupted', 'source_unavailable',
-  'source_left_page', 'transition_timeout', 'retry_exhausted', 'exporter_binding_mismatch']);
+  'source_left_page', 'transition_timeout', 'retry_exhausted', 'exporter_binding_mismatch', 'resume_structure_changed', 'resume_unavailable']);
 const AUTHOR_STATES = new Set(['received', 'incomplete', 'unobserved', 'unknown']);
 
 export const COLLECTION_STAGE_LABELS = Object.freeze({
@@ -23,6 +23,8 @@ export const COLLECTION_STAGE_LABELS = Object.freeze({
   save_page: 'Сохранение страницы',
   wait_author_data: 'Ожидание исходных заданий',
   reload_section: 'Повторная загрузка раздела',
+  retry_definition: 'Повторный запрос заданий',
+  replace_source: 'Восстановление в новой вкладке',
   finish: 'Завершение сбора',
 });
 
@@ -45,7 +47,9 @@ function diagnosticContext(value) {
     if (url) context[key] = url;
   }
   if (nonnegativeInteger(value.elapsedMs)) context.elapsedMs = value.elapsedMs;
-  for (const key of ['attempt', 'remainingMs', 'retryDelayMs']) if (nonnegativeInteger(value[key])) context[key] = value[key];
+  for (const key of ['attempt', 'remainingMs', 'retryDelayMs', 'idleMs']) if (nonnegativeInteger(value[key])) context[key] = value[key];
+  if (['request', 'reload', 'replace'].includes(value.recovery)) context.recovery = value.recovery;
+  if (typeof value.definitionRetrySkipped === 'boolean') context.definitionRetrySkipped = value.definitionRetrySkipped;
   const networkError = navigationErrorCode(value.networkError);
   if (networkError) context.networkError = networkError;
   const navigation = navigationDiagnostic(value.navigation);

@@ -1,6 +1,6 @@
 import { forgetSourceOrigin, isBuiltinSourceOrigin, rememberSourceOrigin, sourceOrigin } from './source-origins.js';
 
-const ISOLATED_FILES = ['src/capture/source-binding.js', 'src/capture/navigation.js', 'src/capture/section-visit.js', 'src/capture/content.js'];
+const ISOLATED_FILES = ['src/capture/source-binding.js', 'src/capture/navigation.js', 'src/capture/section-visit.js', 'src/capture/confirmed-lesson.js', 'src/capture/content.js'];
 const materialRoute = value => {
   try {
     const url = new URL(value);
@@ -47,6 +47,12 @@ export function prepareSourceSite(chrome, tab) {
       ];
       const existing = await chrome.scripting.getRegisteredContentScripts({ ids: scripts.map(script => script.id) });
       const missing = scripts.filter(script => !existing.some(item => item.id === script.id));
+      const outdated = scripts.filter(script => {
+        const previous = existing.find(item => item.id === script.id);
+        return previous && ['js', 'matches', 'world', 'runAt', 'allFrames', 'persistAcrossSessions'].some(key =>
+          JSON.stringify(previous[key]) !== JSON.stringify(script[key]));
+      });
+      if (outdated.length) await chrome.scripting.updateContentScripts(outdated);
       if (missing.length) {
         await chrome.scripting.registerContentScripts(missing);
         registrationIds = missing.map(script => script.id);

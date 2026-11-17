@@ -1,11 +1,11 @@
 import { createProblemReport, problemReportUrl } from './problem-report.js';
+import { sourceBookKey } from './book-workspaces.js';
 
 const COMMANDS = new Set(['BEGIN_PROBLEM_REPORT', 'APPEND_PROBLEM_EVENTS', 'GET_PROBLEM_REPORT']);
 export const isProblemReportCommand = type => COMMANDS.has(type);
 const bookKey = value => {
   const clean = problemReportUrl(value);
-  const id = clean.match(/^https:\/\/(?:progressme\.ru|platform\.desharschool\.ru)\/(?:cabinet\/(?:school|teacher)\/materials\/book|lesson-editor\/book)\/(\d+)(?:\/|$)/)?.[1];
-  return id ? `${new URL(clean).origin}/book/${id}` : '';
+  return sourceBookKey(clean);
 };
 const savedBook = state => state.collection?.rootUrl || state.book?.rootUrl ||
   state.snapshots?.find(snapshot => /\/cabinet\/(?:school|teacher)\/materials\/book\/\d+\/content\/?$/.test(snapshot.url || ''))?.url;

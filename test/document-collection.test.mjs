@@ -57,7 +57,7 @@ function source({ stalePolls = 4, authorReload = false, loaderReload = false, ne
     if (['PREPARE_BOOK', 'TAKE_SNAPSHOT', 'OPEN_MATERIAL_ITEM', 'NAVIGATE_SOURCE'].includes(type)) {
       if (switchBefore === type && position === 11) generation++;
       if (message.expectedDocumentToken && message.expectedDocumentToken !== token()) throw Object.assign(new Error('Document changed'), { code: 'source_changed' });
-      assert.equal(Boolean(pending), false, `${type} must wait for the newly loaded document`);
+      if (!(type === 'NAVIGATE_SOURCE' && message.recovery)) assert.equal(Boolean(pending), false, `${type} must wait for the newly loaded document`);
     }
     if (type === 'BEGIN_COLLECTION') return { ok: true, collectionId: 'document-collection-test' };
     if (type === 'NAVIGATE_SOURCE') {
@@ -111,7 +111,7 @@ test('an unchanged document reaches the shared transition deadline without a sna
   const report = await collect(app);
   assert.equal(report.status, 'failed');
   assert.equal(report.diagnostics.failure.reason, 'document_load_timeout');
-  assert.equal(app.calls.filter(call => call.type === 'GET_NAVIGATION').length, 37);
+  assert.equal(app.calls.filter(call => call.type === 'GET_NAVIGATION').length, 39, 'two recovery rechecks share the same bounded deadline');
   assert.equal(app.snapshots.length, 0);
   assert.equal(app.calls.some(call => ['OPEN_MATERIAL_ITEM', 'PREPARE_BOOK'].includes(call.type)), false);
   assert.equal(app.checkpoints.at(-1).status, 'failed');

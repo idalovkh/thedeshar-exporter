@@ -190,7 +190,7 @@ export function createExportPackage({ snapshots = [], captures = [], assets = []
   const coverage = buildCoverage({ snapshots, captures, dropped, collection });
   entries.push({ name: 'coverage.json', data: json(coverage) });
   if (collection) {
-    const { diagnostics, ...archivedCollection } = collection;
+    const { diagnostics, resume, ...archivedCollection } = collection;
     entries.push({ name: 'collection.json', data: json(archivedCollection) });
   }
   const manifest = redactSensitive({

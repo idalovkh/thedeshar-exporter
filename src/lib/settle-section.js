@@ -1,10 +1,10 @@
 import { MAX_TRANSITION_ATTEMPTS } from './source-transition-policy.js';
 import { isLessonBootstrapUrl } from './source-navigation-lesson-landing.js';
 
-const RETRYABLE = new Set(['section_loading_timeout', 'section_render_timeout', 'author_data_missing', 'author_data_incomplete', 'navigation_timeout']);
+const RETRYABLE = new Set(['section_loading_timeout', 'section_render_timeout', 'author_data_missing', 'author_data_incomplete', 'navigation_timeout', 'document_load_timeout']);
 
 export async function settleSection({ matches, context, verifySections, settled, request, activeSection,
-  startStage, log, pageError, transition, pollMs, initialOptions = {} }) {
+  startStage, log, pageError, blockedPageError, transition, pollMs, initialOptions = {} }) {
   let match = matches, options = { watchSection: true, ...initialOptions };
   let original, verify = verifySections;
   for (;;) {
@@ -32,8 +32,8 @@ export async function settleSection({ matches, context, verifySections, settled,
         } catch (recheckError) {
           if (!['source_timeout', 'source_disconnected', 'source_loading', 'source_network_error', 'source_unavailable'].includes(recheckError.code) || !transition.remaining()) throw recheckError;
           log('waiting', { reason: recheckError.code, attempt: transition.attempt(), remainingMs: Math.floor(transition.remaining()) });
-          await transition.pause(pollMs);
-          continue;
+          if (transition.attemptRemaining() > 0) { await transition.pause(pollMs); continue; }
+          current = expected;
         }
         if (!current || current.kind !== expected.kind || current.lessonId !== expected.lessonId ||
           (bootstrap ? !matches(current) : current.url !== expected.url) ||
@@ -41,23 +41,26 @@ export async function settleSection({ matches, context, verifySections, settled,
         if (current.kind === 'book' && JSON.stringify(current.items) !== JSON.stringify(expected.items)) {
           throw pageError('Список уроков изменился. Повторите сбор из содержания книги.', context, current.url, 'source_changed');
         }
-        if (current.blocked) throw pageError(current.readinessReason || current.warnings?.at(-1) || 'Навигация страницы недоступна.', context, current.url, 'navigation_blocked');
+        if (current.blocked) throw blockedPageError(current, context);
         if (current.ready && original) verify?.(current);
         // Completion can race with the soft deadline. Observe stability without
         // restarting a page whose source data has already arrived.
-        if (matches(current) && current.ready && (!options.watchSection || current.sectionVisit?.received)) {
+        if (matches(current) && current.ready && (!options.watchSection || current.sectionVisit?.received) &&
+          (!options.previousDocumentToken || current.documentToken !== options.previousDocumentToken)) {
           options = { ...options, previousDocumentToken: '' };
           continue;
         }
       }
-      const result = await transition.retry(error.code);
+      const idleMs = Math.floor(transition.idleMs());
+      const result = await transition.recover(error.code);
       if (!result) {
         if (!transition.remaining() || transition.attempt() >= MAX_TRANSITION_ATTEMPTS) throw error;
         await transition.pause(pollMs);
         continue;
       }
-      startStage(options.watchSection ? expected?.kind === 'book' ? 'open_lesson' : 'reload_section' : 'book', transition.attempt());
-      log('retrying', { reason: error.code });
+      startStage(result.recovery === 'request' ? 'retry_definition' : result.recovery === 'replace' ? 'replace_source' :
+        options.watchSection ? expected?.kind === 'book' ? 'open_lesson' : 'reload_section' : 'book', transition.attempt());
+      log('retrying', { reason: error.code, recovery: result.recovery, idleMs, definitionRetrySkipped: result.definitionRetrySkipped });
       match = nav => {
         if (!original) return matches(nav);
         if (nav.url !== original.url || nav.kind !== original.kind || nav.lessonId !== original.lessonId) return false;

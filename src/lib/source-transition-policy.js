@@ -2,3 +2,6 @@ export const TRANSITION_TIMEOUT_MS = 180_000;
 export const MAX_TRANSITION_ATTEMPTS = 3;
 export const TRANSITION_RETRY_AFTER_MS = 60_000;
 export const TRANSITION_RETRY_DELAYS_MS = Object.freeze([2_000, 5_000]);
+export const SOURCE_STALL_MS = 30_000;
+export const SOURCE_RECOVERY_STALL_MS = 60_000;
+export const DEFINITION_RETRY_WAIT_MS = 15_000;

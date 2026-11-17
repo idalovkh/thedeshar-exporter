@@ -1,6 +1,7 @@
 import { isSourceUrl } from './state.js';
 
 const CATALOGUE = 'book-workspaces-v1';
+const BINDINGS = 'book-workspace-bindings-v1';
 export function sourceBookKey(value) {
   if (!isSourceUrl(value)) return '';
   const url = new URL(value);
@@ -16,8 +17,8 @@ export function retainedBook(state = {}) {
     rootUrl: book.rootUrl };
 }
 
-/** A small session catalogue points at retained records; adopting legacy never copies media. */
-export function createBookWorkspaces({ storage, listLegacy = async () => [], randomUUID = () => crypto.randomUUID() } = {}) {
+/** Durable book identities point at records; live tab bindings remain session-only. */
+export function createBookWorkspaces({ storage, sessionStorage = storage, listLegacy = async () => [], randomUUID = () => crypto.randomUUID() } = {}) {
   let pending = Promise.resolve();
   function queued(operation) {
     const task = pending.catch(() => {}).then(operation);
@@ -27,7 +28,15 @@ export function createBookWorkspaces({ storage, listLegacy = async () => [], ran
   async function load() {
     const stored = (await storage.get(CATALOGUE))[CATALOGUE];
     const entries = Array.isArray(stored?.entries) ? stored.entries : [];
-    if (stored?.adopted) return entries;
+    const bindings = (await sessionStorage.get(BINDINGS))[BINDINGS] || {};
+    if (stored?.durable) return entries.map(entry => ({ ...entry, ...bindings[entry.workspaceId] }));
+    // The supported predecessor kept this small catalogue in the current
+    // browser session. Retain its workspace/storage IDs instead of rebuilding
+    // duplicate books or loading their raw records during adoption.
+    const legacy = (await sessionStorage.get(CATALOGUE))[CATALOGUE];
+    for (const entry of Array.isArray(legacy?.entries) ? legacy.entries : []) {
+      if (!entries.some(previous => previous.workspaceId === entry.workspaceId || previous.storageId === entry.storageId)) entries.push(entry);
+    }
     for (const { storageId, state } of await listLegacy()) {
       if (entries.some(entry => entry.storageId === storageId)) continue;
       const book = retainedBook(state);
@@ -38,7 +47,17 @@ export function createBookWorkspaces({ storage, listLegacy = async () => [], ran
     await save(entries);
     return entries;
   }
-  const save = entries => storage.set({ [CATALOGUE]: { adopted: true, entries } });
+  const save = async entries => {
+    const bindings = {};
+    const retained = entries.map(({ sourceTabId, exporterTabId, ...entry }) => {
+      if (sourceTabId !== undefined || exporterTabId !== undefined) bindings[entry.workspaceId] = {
+        ...(sourceTabId !== undefined ? { sourceTabId } : {}), ...(exporterTabId !== undefined ? { exporterTabId } : {}),
+      };
+      return entry;
+    });
+    await sessionStorage.set({ [BINDINGS]: bindings });
+    await storage.set({ [CATALOGUE]: { adopted: true, durable: true, entries: retained } });
+  };
   const clone = value => value ? structuredClone(value) : null;
   function get(workspaceId) { return queued(async () => clone((await load()).find(entry => entry.workspaceId === workspaceId))); }
   function list() { return queued(async () => structuredClone(await load())); }
@@ -79,7 +98,7 @@ export function createBookWorkspaces({ storage, listLegacy = async () => [], ran
   function update(workspaceId, { state, sourceTabId, exporterTabId, book } = {}) {
     return queued(async () => {
       const entries = await load(), entry = entries.find(entry => entry.workspaceId === workspaceId);
-      if (!entry) throw new Error('Сохранённая книга недоступна в этой сессии Chrome.');
+      if (!entry) throw new Error('Сохранённая книга недоступна в локальном хранилище.');
       const selected = book || (state && retainedBook(state));
       if (selected && sourceBookKey(selected.rootUrl) && (!entry.bookKey || sourceBookKey(selected.rootUrl) === entry.bookKey)) {
         entry.book = selected; entry.bookKey = sourceBookKey(selected.rootUrl);

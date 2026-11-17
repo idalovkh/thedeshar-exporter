@@ -58,7 +58,7 @@ test('a stalled return to contents reports readiness and changing lesson counts 
   const waiting = events.filter(event => event.stage === 'book' && event.status === 'waiting' && event.readinessReason);
   assert.ok(waiting.some(event => event.bookState.visibleLessons === 0), 'the first incomplete list must be logged');
   assert.ok(waiting.some(event => event.bookState.visibleLessons === 1), 'changed counts must be logged even with the same reason');
-  const failures = events.filter(event => event.stage === 'book' && event.status === 'failed');
+  const failures = events.filter(event => ['book', 'replace_source'].includes(event.stage) && event.status === 'failed');
   assert.equal(failures.length, 3);
   assert.ok(failures.every(event => event.readinessReason === readinessReason && event.bookState.expectedLessons === 2));
   assert.deepEqual(checkpoints.at(-1).diagnostics.failure.bookState, report.diagnostics.failure.bookState);

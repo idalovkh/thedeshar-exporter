@@ -1,8 +1,10 @@
 import { createWebpOptimizer } from '../lib/webp-optimizer.js';
-import { rasterImageCandidate } from '../lib/raster-image-metadata.js';
+import { inspectRasterImage, rasterImageSource } from '../lib/raster-image-metadata.js';
+import { acceptsImportOriginal } from '../lib/import-original-admission.js';
 import { imagePreparationError } from '../lib/fullhd-image.js';
 import { downloadMediaAssets } from './assets.js';
 import { downloadDiskMedia } from './download-disk-media.js';
+import { createPreparedMediaCache } from '../lib/prepared-media-cache.js';
 
 const LOCK = 'thedeshar-exporter-webp';
 
@@ -12,12 +14,24 @@ export async function downloadExportMedia(candidates, { onWait, onCodecFailure, 
   if (!candidates.length) return downloadMediaAssets(candidates, options);
   if (signal?.aborted) throw new DOMException('Скачивание отменено.', 'AbortError');
 
+  async function diskMedia(allowCodec = true) {
+    let cache = options.mediaCache;
+    const ownsCache = cache === undefined;
+    if (ownsCache) try { cache = await createPreparedMediaCache({ signal, locks }); }
+    catch (error) { if (signal?.aborted) throw error; }
+    try { return await downloadDiskMedia(candidates, { ...options, mediaCache: cache, allowCodec, onCodecFailure }); }
+    finally { if (ownsCache) try { await cache?.close(); } catch { /* Optional cache cleanup cannot fail a valid export. */ } }
+  }
+
   function downloadWithoutCodec() {
-    if (options.spool) return downloadDiskMedia(candidates, { ...options, allowCodec: false, onCodecFailure });
+    if (options.spool) return diskMedia(false);
     onCodecFailure?.('unavailable');
     return downloadMediaAssets(candidates, { ...options, deduplicate: true, async optimizeMedia(file) {
-      if (await rasterImageCandidate(file.data, file.mimeType)) {
-        throw imagePreparationError('image_dimensions_unverified');
+      const metadata = await inspectRasterImage(file.data, file.mimeType);
+      if (metadata) {
+        const data = rasterImageSource(file.data, metadata);
+        if (!await acceptsImportOriginal(data, metadata)) throw imagePreparationError('image_dimensions_limit');
+        return { ...file, data, mimeType: metadata.mimeType, originalImage: true };
       }
       return file;
     } });
@@ -29,7 +43,7 @@ export async function downloadExportMedia(candidates, { onWait, onCodecFailure, 
     onWait?.();
     return await locks.request(LOCK, { mode: 'exclusive', ...(signal ? { signal } : {}) }, async () => {
       acquired = true;
-      if (options.spool) return downloadDiskMedia(candidates, { ...options, onCodecFailure });
+      if (options.spool) return diskMedia();
       const optimizer = createWebpOptimizer({ signal, onFailure: onCodecFailure });
       try {
         return await downloadMediaAssets(candidates, { ...options, deduplicate: true, optimizeMedia: optimizer.optimize });

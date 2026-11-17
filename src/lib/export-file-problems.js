@@ -1,7 +1,7 @@
 const incomplete = message => Object.assign(new Error(message), { code: 'incomplete_export' });
 const TERMINAL_PROBLEMS = new Set(['failed', 'skipped', 'unavailable']);
 
-/** Consent covers known file failures, never missing results or unverified bytes. */
+/** Only terminal file failures can be omitted; missing results and unverified bytes remain fatal. */
 export function exportFileProblems(files, expected = files) {
   const expectedUrls = new Set(expected.map(asset => asset.url));
   const fileUrls = new Set(files.map(file => file.url));
@@ -19,7 +19,5 @@ export function exportFileProblems(files, expected = files) {
       throw incomplete('Не все файлы книги обработаны корректно. Архив не создан. Повторите скачивание.');
     }
   }
-  if (problems.length > 2)
-    throw incomplete(`Не удалось получить ${problems.length} файлов книги. Архив не создан: допускается не более двух пропущенных файлов. Скачайте отчёт о проблеме и пришлите нам — поможем разобраться.`);
   return problems;
 }

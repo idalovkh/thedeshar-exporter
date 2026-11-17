@@ -21,7 +21,7 @@
   const validCaptureId = value => typeof value === 'string' && /^[a-zA-Z0-9-]{16,100}$/.test(value);
   let stateRevision = 0;
   let captureState = 'pending';
-  const pageCommands = new Set(['MATERIAL_NAVIGATION', 'PREPARE_BOOK', 'PAGE_SNAPSHOT', 'OPEN_MATERIAL_ITEM', 'NAVIGATE_SOURCE']);
+  const pageCommands = new Set(['MATERIAL_NAVIGATION', 'PREPARE_BOOK', 'PAGE_SNAPSHOT', 'OPEN_MATERIAL_ITEM', 'OPEN_CONFIRMED_LESSON', 'NAVIGATE_SOURCE']);
   const sectionVisit = globalThis.__thedesharCreateSectionVisit({ getUrl: () => location.href, getCaptureId: () => captureId });
   // Reported by the MAIN observer for the active capture revision only. The
   // collector treats it as a timing hint; snapshots never include it.
@@ -77,56 +77,6 @@
         Boolean(value.Value.Book && typeof value.Value.Book === 'object'));
   }
 
-  // Retain only authored scoring rules; learner scores/history never cross worlds.
-  function authoredStatistics(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-    const result = {};
-    const unsupported = '[unsupported scoring definition]';
-    const scalar = item => item === null || typeof item === 'number' && Number.isFinite(item) ||
-      typeof item === 'string' && /^-?\d+(?:\.\d+)?$/.test(item) ? item : unsupported;
-    if (Object.hasOwn(value, 'ScoringType')) result.ScoringType = scalar(value.ScoringType);
-    if (Object.hasOwn(value, 'ConfigurationJson')) {
-      let configuration = value.ConfigurationJson;
-      if (configuration === null || typeof configuration === 'string' && !configuration.trim()) {
-        result.ConfigurationJson = configuration;
-        return result;
-      }
-      const serialized = typeof configuration === 'string';
-      if (serialized) {
-        if (configuration.length > 1024 * 1024 || new TextEncoder().encode(configuration).byteLength > 1024 * 1024) configuration = undefined;
-        else {
-          try { configuration = JSON.parse(configuration); } catch { configuration = undefined; }
-        }
-      }
-      if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)) {
-        result.ConfigurationJson = unsupported;
-      } else {
-        const config = {};
-        for (const field of ['TotalPoints', 'TotalCountAnswers', 'MaxPoints']) {
-          if (Object.hasOwn(configuration, field)) config[field] = scalar(configuration[field]);
-        }
-        for (const [field, fields] of [['TestAnswers', ['AnswerId', 'Points']], ['Points', ['CountAnswersFalse', 'Point']]]) {
-          if (!Object.hasOwn(configuration, field)) continue;
-          config[field] = Array.isArray(configuration[field]) && configuration[field].length <= 4000 ? configuration[field].map(item => {
-            if (!item || typeof item !== 'object' || Array.isArray(item)) return unsupported;
-            return Object.fromEntries(fields.filter(name => Object.hasOwn(item, name)).map(name => [name, scalar(item[name])]));
-          }) : unsupported;
-        }
-        result.ConfigurationJson = serialized ? JSON.stringify(config) : config;
-      }
-    }
-    return Object.keys(result).length ? result : undefined;
-  }
-
-  function parsedDefinitionJson(key, value) {
-    if (!['JsonData', 'ImagesJson'].includes(key) || typeof value !== 'string' ||
-      value.length > MAX_BYTES || new TextEncoder().encode(value).byteLength > MAX_BYTES) return undefined;
-    try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === 'object' ? parsed : undefined;
-    } catch { return undefined; }
-  }
-
   function isMaterialPage() {
     return /\/(?:cabinet\/(?:school|teacher)\/materials(?:\/|$)|lesson-editor(?:\/|$))/.test(location.pathname);
   }
@@ -143,25 +93,13 @@
     } catch { return null; }
   }
 
-  function safeReference(value) {
-    const encoded = /&(?:amp|#0*38|#x0*26);/i.test(value);
-    const decoded = value.replace(/&(?:amp|#0*38|#x0*26);/gi, '&');
-    const sanitized = safeUrl(decoded);
-    return encoded && sanitized ? sanitized.replace(/&/g, '&amp;') : sanitized;
-  }
-
   function captureFailure(code) { return Object.assign(new Error(code), { captureCode: code }); }
 
-  function sanitize(value, depth = 0, seen = new WeakSet(), budget = { count: 0 }) {
+  function captureData(value, depth = 0, seen = new WeakSet(), budget = { count: 0 }) {
     if (++budget.count > 100000 || depth > 24) throw captureFailure('response_too_complex');
     if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
-    if (typeof value === 'string') {
-      if (/\bBearer\s+[A-Za-z0-9._~+\/-]+/i.test(value) || /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/.test(value)) return '[redacted]';
-      if (/^(?:https?|wss?):\/\//i.test(value)) return safeReference(value);
-      if (/^\/(?!\/)[^\s<>]*[?#]/.test(value)) return safeReference(value);
-      const stripped = value.replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, match => safeReference(match) || '[unsupported URL]');
-      return stripped;
-    }
+    // Revalidate structure here; deep body cleanup runs once when packaging.
+    if (typeof value === 'string') return value;
     if (!value || typeof value !== 'object') return undefined;
     const definitions = exerciseDefinitions(value) || bookCourses(value);
     if (rpcEnvelope(value) && !definitions && !lessonMetadata(value)) return undefined;
@@ -170,24 +108,14 @@
     seen.add(value);
     if (Array.isArray(value)) {
       if (value.length > 4000) throw captureFailure('response_too_complex');
-      const result = value.map(item => sanitize(item, depth + 1, seen, budget));
+      const result = value.map(item => captureData(item, depth + 1, seen, budget));
       seen.delete(value);
       return result;
     }
     const result = Object.create(null);
     const entries = Object.entries(value);
     if (entries.length > 4000) throw captureFailure('response_too_complex');
-    for (const [key, item] of entries) {
-      if (SECRET_KEY.test(key)) continue;
-      if (key === 'Statistics') {
-        const statistics = authoredStatistics(item);
-        if (statistics !== undefined) result[key] = sanitize(statistics, depth + 1, seen, budget);
-        continue;
-      }
-      const parsed = parsedDefinitionJson(key, item);
-      result[key] = parsed === undefined ? sanitize(item, depth + 1, seen, budget)
-        : JSON.stringify(sanitize(parsed, depth + 1, seen, budget) ?? null);
-    }
+    for (const [key, item] of entries) result[key] = captureData(item, depth + 1, seen, budget);
     seen.delete(value);
     return result;
   }
@@ -206,7 +134,7 @@
       return Boolean(exerciseDefinitions(value) || bookCourses(value) || lessonMetadata(value));
     }
     if (Array.isArray(value)) return value.some(item => materialPayload(item, depth + 1, budget));
-    return Object.entries(value).some(([key, item]) => /^(?:materials?|books?|lessons?|sections?|exercises?|units?|blocks?|exercise_type|exerciseType|answer_key|answerKey|correct_answers|correctAnswers|wordlist|word_list|vocabulary_words)$/i.test(key) || materialPayload(item, depth + 1, budget));
+    return Object.entries(value).some(([key, item]) => /^(?:materials?|books?|lessons?|sections?|exercises?|units?|blocks?|exercise_type|exerciseType|answer_key|answerKey|correct_answers|correctAnswers|wordlist|word_list|vocabulary_words)$/i.test(key) || !SECRET_KEY.test(key) && materialPayload(item, depth + 1, budget));
   }
 
   function applyBookInventory(value, depth = 0, budget = { count: 0 }) {
@@ -252,13 +180,16 @@
       const url = safeUrl(sourceEvent.url);
       if (!url) return;
       const endpoint = new URL(url);
-      if (/(?:^|\/)(?:auth|login|logout|oauth|signin|signup|account|profile|users?|students?|employees?|members?|payments?|billing|finance|notifications?|analytics|telemetry|messages?|chats?)(?:\/|$)/i.test(endpoint.pathname) ||
-        !(endpoint.origin === location.origin || /(?:^|\.)(?:progressme\.ru|docstorio\.com)$/.test(endpoint.hostname))) return;
-      const captureEvent = { kind: sourceEvent.kind, url, receivedAt: new Date().toISOString(), data: sanitize(sourceEvent.data) };
+      if (/(?:^|\/)(?:auth|login|logout|oauth|signin|signup|account|profile|users?|students?|employees?|members?|payments?|billing|finance|notifications?|analytics|telemetry|messages?|chats?)(?:\/|$)/i.test(endpoint.pathname)) return;
+      const captureEvent = { kind: sourceEvent.kind, url, receivedAt: new Date().toISOString(), data: captureData(sourceEvent.data) };
       if (!materialPayload(captureEvent.data)) return;
       const serialized = JSON.stringify(captureEvent);
       if (serialized.length > MAX_BYTES || new TextEncoder().encode(serialized).byteLength > MAX_BYTES) {
         void send({ type: 'CAPTURE_ISSUE', captureId, code: 'response_too_large' });
+        return;
+      }
+      if (message.observedPage !== undefined && message.observedPage !== `${location.origin}${location.pathname}`) {
+        void send({ type: 'CAPTURE_ISSUE', captureId, code: 'bootstrap_navigation_changed' });
         return;
       }
       applyBookInventory(captureEvent.data);
@@ -456,7 +387,7 @@
 
   function handleSourceMessage(message, respond) {
     if (pageCommands.has(message?.type) &&
-      (message.expectedDocumentToken !== undefined || message.type === 'NAVIGATE_SOURCE') && message.expectedDocumentToken !== documentToken) {
+      (message.expectedDocumentToken !== undefined || ['NAVIGATE_SOURCE', 'OPEN_CONFIRMED_LESSON'].includes(message.type)) && message.expectedDocumentToken !== documentToken) {
       respond({ ok: false, code: 'source_changed', error: 'Исходная вкладка перезагрузилась. Повторно прочитайте навигацию перед продолжением.' });
       return false;
     }
@@ -513,6 +444,11 @@
         catch { respond({ ok: false, error: 'Не удалось открыть раздел.' }); }
       }
     }
+    else if (message?.type === 'OPEN_CONFIRMED_LESSON') {
+      if (!enabled) respond({ ok: false, error: 'Сбор выключен.' });
+      else respond(globalThis.__thedesharOpenConfirmedLesson?.(message, () => sectionVisit.begin()) || {
+        ok: false, code: 'source_lesson_unconfirmed', error: 'Обновите расширение и вкладку книги для перехода к следующему уроку.' });
+    }
     else if (message?.type === 'NAVIGATE_SOURCE') {
       try {
         const current = new URL(location.href), expected = new URL(message.expectedUrl), target = new URL(message.url);
@@ -545,7 +481,7 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     const wrongDocument = pageCommands.has(message?.type) &&
-      (message.expectedDocumentToken !== undefined || message.type === 'NAVIGATE_SOURCE') && message.expectedDocumentToken !== documentToken;
+      (message.expectedDocumentToken !== undefined || ['NAVIGATE_SOURCE', 'OPEN_CONFIRMED_LESSON'].includes(message.type)) && message.expectedDocumentToken !== documentToken;
     // Startup and explicit capture commands keep their synchronous handshake.
     if (!pageCommands.has(message?.type) || captureState !== 'ready' || wrongDocument) return handleSourceMessage(message, respond);
     const revision = stateRevision;

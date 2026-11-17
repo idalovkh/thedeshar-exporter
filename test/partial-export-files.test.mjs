@@ -9,7 +9,7 @@ const retained = { id: 'asset-1', url: 'https://cdn.example.org/one.mp3', name: 
 const missing = (index, status = 'failed') => ({ id: `asset-${index}`, url: `https://cdn.example.org/${index}.jpg`,
   name: `${index}.jpg`, status, error: 'Сервер не отдал файл.' });
 
-test('terminal file problems are returned for consent without discarding retained files', () => {
+test('terminal file problems are reported without discarding retained files', () => {
   const problems = [missing(2), missing(3, 'skipped')];
   const files = [retained, ...problems];
   assert.deepEqual(exportFileProblems(files, files), problems);
@@ -19,7 +19,7 @@ test('terminal file problems are returned for consent without discarding retaine
   assert.deepEqual(exportFileProblems([], []), []);
 });
 
-test('consent cannot excuse omitted, duplicate or unknown inventory entries', () => {
+test('terminal omissions cannot excuse missing, duplicate or unknown inventory entries', () => {
   const expected = [retained, missing(2)];
   for (const files of [[retained], [retained, missing(3)], [retained, retained]])
     assert.throws(() => exportFileProblems(files, expected), { code: 'incomplete_export' });
@@ -34,7 +34,7 @@ test('invalid downloaded bodies and unverified failure bytes never enter a parti
     assert.throws(() => exportFileProblems([{ ...retained, status }]), { code: 'incomplete_export' });
 });
 
-test('approved file omissions retain source links, reasons, counts and warnings in the manifest', () => {
+test('terminal file omissions retain source links, reasons, counts and warnings in the manifest', () => {
   const files = [retained, missing(2), missing(3, 'unavailable')];
   const before = files.map(file => ({ ...file }));
   const prepared = createExportPackage({ assets: files.map(({ data, ...asset }) => asset) });

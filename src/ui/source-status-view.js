@@ -1,6 +1,9 @@
 import { navigationStopMessage } from '../lib/source-navigation-errors.js';
+import { navigationBlockMessage } from '../lib/navigation-block-reasons.js';
 
 const FAILURE_MESSAGES = Object.freeze({
+  resume_structure_changed: 'Структура книги изменилась. Сохранённые материалы оставлены. Выберите «Собрать заново», чтобы получить текущую книгу.',
+  resume_unavailable: 'Не удалось подтвердить сохранённые разделы этой книги. Выберите «Собрать заново».',
   source_network_error: 'Не удалось загрузить страницу из-за ошибки соединения.',
   source_security_error: 'Браузер или платформа ограничили доступ к странице.',
   source_interrupted: 'Загрузка страницы была прервана.',
@@ -20,6 +23,7 @@ const FAILURE_MESSAGES = Object.freeze({
   section_render_timeout: 'Платформа не показала задания раздела.',
   document_load_timeout: 'Не удалось дождаться загрузки страницы.',
   navigation_timeout: 'Не удалось дождаться открытия нужной страницы.',
+  navigation_blocked: 'Экспортёр не смог начать обход уроков и разделов.',
 });
 
 export function sourceConnectionView({ sourceStatus, sourceKey, expectedKey, closed, disconnected } = {}) {
@@ -48,6 +52,11 @@ export function sourceConnectionView({ sourceStatus, sourceKey, expectedKey, clo
 
 export function collectionLoadingDetail(event) {
   if (!event) return '';
+  if (event.status === 'retrying') {
+    if (event.recovery === 'request') return 'Повторяем загрузку заданий.';
+    if (event.recovery === 'reload') return 'Перезагружаем страницу.';
+    if (event.recovery === 'replace') return 'Продолжаем в новой вкладке.';
+  }
   if (['started', 'waiting', 'retrying'].includes(event.status) &&
     Number.isInteger(event.attempt) && event.attempt >= 2 && event.attempt <= 3) {
     return `Повторная загрузка раздела. Попытка ${event.attempt} из 3.`;
@@ -76,6 +85,7 @@ export function collectionFailureNotice(report) {
   const context = [lesson && `Урок «${lesson}»`, section && `раздел «${section}»`].filter(Boolean).join(', ');
   const navigationReason = ['source_left_page', 'source_changed', 'source_unavailable', 'source_update_required', 'document_load_timeout', 'navigation_timeout'].includes(failure?.reason)
     ? navigationStopMessage(failure.navigation) : '';
-  const reason = navigationReason || (Object.hasOwn(FAILURE_MESSAGES, failure?.reason) ? FAILURE_MESSAGES[failure.reason] : 'Не удалось завершить сбор всей книги.');
+  const blocker = failure?.reason === 'navigation_blocked' ? navigationBlockMessage(failure.blockedReasonCode) : '';
+  const reason = blocker || navigationReason || (Object.hasOwn(FAILURE_MESSAGES, failure?.reason) ? FAILURE_MESSAGES[failure.reason] : 'Не удалось завершить сбор всей книги.');
   return `${context ? `${context}: ` : ''}${reason} Проверьте страницу книги и повторите сбор. Если ошибка повторяется, скачайте отчёт о проблеме и пришлите нам.`;
 }

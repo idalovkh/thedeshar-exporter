@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "exporter",
   "short_name": "exporter",
-  "version": "0.3.44",
+  "version": "1.0.3",
   "minimum_chrome_version": "119",
   "description": "Экспорт учебных материалов в ZIP для переноса между платформами.",
   "permissions": [
@@ -61,6 +61,7 @@
         "src/capture/source-binding.js",
         "src/capture/navigation.js",
         "src/capture/section-visit.js",
+        "src/capture/confirmed-lesson.js",
         "src/capture/content.js"
       ],
       "run_at": "document_start",

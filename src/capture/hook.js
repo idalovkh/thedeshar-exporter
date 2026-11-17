@@ -7,13 +7,13 @@
 
   const CHANNEL_SOURCE = 'thedeshar-exporter-v1';
   const MAX_BYTES = 8 * 1024 * 1024;
-  const deniedPath = /(?:^|\/)(?:auth|login|logout|oauth|signin|signup|account|profile|users?|students?|employees?|members?|payments?|billing|finance|notifications?|analytics|telemetry|messages?|chats?)(?:\/|$)/i;
   const secretKey = /(?:password|passwd|passphrase|authorization|cookie|access[_-]?token|refresh[_-]?token|auth[_-]?token|session[_-]?token|jwt[_-]?token|client[_-]?secret|api[_-]?key|private[_-]?key|^token$|^jwt$|^secret$|^session$|^session_?id$|^credentials?$|^csrf(?:_?token)?$|^xsrf(?:_?token)?$|^email$|^phone(?:_number)?$|^students?$|^users?$|^payments?$)/i;
+  const deniedPath = /(?:^|\/)(?:auth|login|logout|oauth|signin|signup|account|profile|users?|students?|employees?|members?|payments?|billing|finance|notifications?|analytics|telemetry|messages?|chats?)(?:\/|$)/i;
   const secretQuery = /^(?:.*token|auth(?:orization)?|api[_-]?key|key|password|passwd|secret|session(?:id)?|sid|jwt|signature|sig|credential|policy|key[_-]?pair[_-]?id|code|csrf(?:[_-]?token)?|xsrf(?:[_-]?token)?|x[_-]amz[_-].*|x[_-]goog[_-].*)$/i;
   const materialKey = /^(?:materials?|books?|lessons?|sections?|exercises?|units?|blocks?|exercise_type|exerciseType|answer_key|answerKey|correct_answers|correctAnswers|wordlist|word_list|vocabulary_words)$/i;
   // Confirmed by ProgressMe lesson_shell GetExerciseWsController and the
   // exercises_shell ExerciseModel. Keep this definition projection in sync with
-  // lib/security.js, which independently validates the persisted response.
+  // lib/security.js, which cleans the response during archive preparation.
   const definitionFields = new Set(('Id Type Name Number ExerciseNumber IsAutoCheck IsLessonPage IsShowExerciseNumber JsonData Images ImageInputCorrectWord PasteWordByDrag InputCorrectFormWord SelectCorrectFormWord Essay ImageSelectCorrectWord Note Audios Button Text BuildWordFromLetters PracticeId PersonalMaterialId HomeworkLessonId PracticeNumber SectionId LessonSectionId Videos VideosUrl AudioRecording Questions QuestionAnswers MappingWords Words AddWordsToVocabulary Topic MappingImageByDrag GroupWordsByColumns Test QuestionWithCodingTexts SentencesInCorrectOrder Descriptions NumberToHeader MainNumberToHeader MiroBoard GooglePDF Wordwall Learningapps Genially Baamboozle Quizlet ChoiseExtraWords TrueOrFalse IsHidePupil ImagesJson AutoCheck TimerMinutes UsedNewConstructor Statistics').split(' '));
   const definitionTypes = new Set([2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42, 43, 99]);
   let enabled = false;
@@ -21,14 +21,18 @@
   let channelRevision = -1;
   let stateKnown = false;
   let captureEpoch = 0;
-  // Observed authored HTTP/RPC requests still in flight. A response after a route
-  // change is reported as ambiguous, so the collector waits for zero.
+  const routeUrl = () => `${location.origin}${location.pathname}`;
+  let previousRoute = routeUrl();
+  let routeFrom = null;
+  let routeRevision = 0;
+  const responseScope = () => ({ page: location.href, epoch: captureEpoch, revision: routeRevision });
+  // The collector waits for in-flight HTTP/RPC responses before saving a page.
   let pendingRequests = 0;
   const socketRequests = new WeakMap();
   const pendingSocketRequests = new Set();
   const MAX_PENDING_RPC = 256;
   const MAX_RPC_REQUEST_BYTES = 64 * 1024;
-  // Temporary sanitized data covers only the opt-in restoration handshake. It
+  // Temporary source data covers only the opt-in restoration handshake. It
   // never persists or crosses worlds before the background confirms capture.
   const bootstrap = [];
   const bootstrapIssues = new Set();
@@ -123,10 +127,11 @@
   }
 
   function publish(event) {
-    window.postMessage({ source: CHANNEL_SOURCE, direction: 'event', channel, revision: channelRevision, event }, location.origin);
+    window.postMessage({ source: CHANNEL_SOURCE, direction: 'event', channel, revision: channelRevision,
+      observedPage: routeUrl(), event }, location.origin);
   }
 
-  function accept(event, page) {
+  function accept(event) {
     if (stateKnown) { if (enabled && channel) publish(event); return; }
     if (bootstrapIssues.has('bootstrap_overflow')) return;
     const bytes = new TextEncoder().encode(JSON.stringify(event)).byteLength;
@@ -136,7 +141,7 @@
       bootstrapIssues.add('bootstrap_overflow');
       return;
     }
-    bootstrap.push({ event, page });
+    bootstrap.push({ event, page: location.href, revision: routeRevision });
     bootstrapBytes += bytes;
   }
 
@@ -147,7 +152,7 @@
     if (stateKnown) return;
     stateKnown = true;
     if (enabled) {
-      if (bootstrap.some(item => item.page !== location.href)) {
+      if (bootstrap.some(item => item.page !== location.href || item.revision !== routeRevision)) {
         bootstrapIssues.add('bootstrap_navigation_changed');
       } else if (!bootstrapIssues.size) {
         for (const { event } of bootstrap) publish(event);
@@ -208,56 +213,6 @@
         Boolean(value.Value.Book && typeof value.Value.Book === 'object'));
   }
 
-  // Retain only authored scoring rules; learner scores/history never cross worlds.
-  function authoredStatistics(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-    const result = {};
-    const unsupported = '[unsupported scoring definition]';
-    const scalar = item => item === null || typeof item === 'number' && Number.isFinite(item) ||
-      typeof item === 'string' && /^-?\d+(?:\.\d+)?$/.test(item) ? item : unsupported;
-    if (Object.hasOwn(value, 'ScoringType')) result.ScoringType = scalar(value.ScoringType);
-    if (Object.hasOwn(value, 'ConfigurationJson')) {
-      let configuration = value.ConfigurationJson;
-      if (configuration === null || typeof configuration === 'string' && !configuration.trim()) {
-        result.ConfigurationJson = configuration;
-        return result;
-      }
-      const serialized = typeof configuration === 'string';
-      if (serialized) {
-        if (configuration.length > 1024 * 1024 || new TextEncoder().encode(configuration).byteLength > 1024 * 1024) configuration = undefined;
-        else {
-          try { configuration = JSON.parse(configuration); } catch { configuration = undefined; }
-        }
-      }
-      if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)) {
-        result.ConfigurationJson = unsupported;
-      } else {
-        const config = {};
-        for (const field of ['TotalPoints', 'TotalCountAnswers', 'MaxPoints']) {
-          if (Object.hasOwn(configuration, field)) config[field] = scalar(configuration[field]);
-        }
-        for (const [field, fields] of [['TestAnswers', ['AnswerId', 'Points']], ['Points', ['CountAnswersFalse', 'Point']]]) {
-          if (!Object.hasOwn(configuration, field)) continue;
-          config[field] = Array.isArray(configuration[field]) && configuration[field].length <= 4000 ? configuration[field].map(item => {
-            if (!item || typeof item !== 'object' || Array.isArray(item)) return unsupported;
-            return Object.fromEntries(fields.filter(name => Object.hasOwn(item, name)).map(name => [name, scalar(item[name])]));
-          }) : unsupported;
-        }
-        result.ConfigurationJson = serialized ? JSON.stringify(config) : config;
-      }
-    }
-    return Object.keys(result).length ? result : undefined;
-  }
-
-  function parsedDefinitionJson(key, value) {
-    if (!['JsonData', 'ImagesJson'].includes(key) || typeof value !== 'string' ||
-      value.length > MAX_BYTES || new TextEncoder().encode(value).byteLength > MAX_BYTES) return undefined;
-    try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === 'object' ? parsed : undefined;
-    } catch { return undefined; }
-  }
-
   function materialPage() {
     return /\/(?:cabinet\/(?:school|teacher)\/materials(?:\/|$)|lesson-editor(?:\/|$))/.test(location.pathname);
   }
@@ -274,34 +229,20 @@
     } catch { return null; }
   }
 
-  function safeReference(value) {
-    const encoded = /&(?:amp|#0*38|#x0*26);/i.test(value);
-    const decoded = value.replace(/&(?:amp|#0*38|#x0*26);/gi, '&');
-    const sanitized = safeUrl(decoded);
-    return encoded && sanitized ? sanitized.replace(/&/g, '&amp;') : sanitized;
-  }
-
   function captureFailure(code) { return Object.assign(new Error(code), { captureCode: code }); }
 
   function allowedEndpoint(value) {
     try {
       const url = new URL(value, location.href);
-      return !deniedPath.test(url.pathname) &&
-        (url.origin === location.origin || /(?:^|\.)(?:progressme\.ru|docstorio\.com)$/.test(url.hostname));
+      return /^(?:https?|wss?):$/.test(url.protocol) && !deniedPath.test(url.pathname);
     } catch { return false; }
   }
 
-  function clean(value, depth = 0, budget = { count: 0 }, seen = new WeakSet()) {
+  function captureData(value, depth = 0, budget = { count: 0 }, seen = new WeakSet()) {
     if (++budget.count > 100000 || depth > 24) throw captureFailure('response_too_complex');
     if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
-    if (typeof value === 'string') {
-      if (/\bBearer\s+[A-Za-z0-9._~+\/-]+/i.test(value) || /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/.test(value)) return '[redacted]';
-      if (/^(?:https?|wss?):\/\//i.test(value)) return safeReference(value) || '[unsupported URL]';
-      if (/^\/(?!\/)[^\s<>]*[?#]/.test(value)) return safeReference(value) || '[unsupported URL]';
-      // URLs can also be embedded in HTML/text fields, not just standalone values.
-      const stripped = value.replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, match => safeReference(match) || '[unsupported URL]');
-      return stripped;
-    }
+    // Keep authored strings and serialized JSON intact until archive preparation.
+    if (typeof value === 'string') return value;
     if (typeof value !== 'object') return undefined;
     const definitions = exerciseDefinitions(value) || bookCourses(value);
     if (rpcEnvelope(value) && !definitions && !lessonMetadata(value)) return undefined;
@@ -310,24 +251,14 @@
     seen.add(value);
     if (Array.isArray(value)) {
       if (value.length > 4000) throw captureFailure('response_too_complex');
-      const result = value.map(item => clean(item, depth + 1, budget, seen));
+      const result = value.map(item => captureData(item, depth + 1, budget, seen));
       seen.delete(value);
       return result;
     }
     const result = Object.create(null);
     const entries = Object.entries(value);
     if (entries.length > 4000) throw captureFailure('response_too_complex');
-    for (const [key, item] of entries) {
-      if (secretKey.test(key) || /(?:access|refresh|auth|session|csrf|xsrf)[_-]?token|password|client[_-]?secret|api[_-]?key/i.test(key)) continue;
-      if (key === 'Statistics') {
-        const statistics = authoredStatistics(item);
-        if (statistics !== undefined) result[key] = clean(statistics, depth + 1, budget, seen);
-        continue;
-      }
-      const parsed = parsedDefinitionJson(key, item);
-      result[key] = parsed === undefined ? clean(item, depth + 1, budget, seen)
-        : JSON.stringify(clean(parsed, depth + 1, budget, seen) ?? null);
-    }
+    for (const [key, item] of entries) result[key] = captureData(item, depth + 1, budget, seen);
     seen.delete(value);
     return result;
   }
@@ -340,15 +271,40 @@
     }
     if (Array.isArray(value)) return value.some(item => isMaterialData(item, depth + 1, budget));
     return Object.entries(value).some(([key, item]) =>
-      materialKey.test(key) || isMaterialData(item, depth + 1, budget));
+      materialKey.test(key) || !secretKey.test(key) && isMaterialData(item, depth + 1, budget));
   }
 
-  function deliver(kind, url, raw, page = location.href, epoch = captureEpoch, observeRpc) {
+  const lessonSectionRoute = /^\/lesson-editor\/book\/([1-9]\d*)\/lesson\/([1-9]\d*)\/section(?:\/([1-9]\d*))?\/?$/;
+  function sectionLanding(page, revision) {
+    if (routeRevision !== revision + 1 || previousRoute !== routeUrl()) return null;
+    const from = new URL(page), to = new URL(location.href);
+    if (from.origin !== to.origin || routeFrom !== `${from.origin}${from.pathname}`) return null;
+    const started = from.pathname.match(lessonSectionRoute), landed = to.pathname.match(lessonSectionRoute);
+    if (!started || started[3] || !landed?.[3] || started[1] !== landed[1] || started[2] !== landed[2]) return null;
+    return { book: landed[1], lesson: landed[2], section: landed[3] };
+  }
+
+  function matchesId(value, id) {
+    return (typeof value === 'string' || Number.isSafeInteger(value)) && String(value) === id;
+  }
+
+  function confirmsSectionLanding(data, target) {
+    if (Array.isArray(data)) return data.length > 0 && data.every(entry => confirmsSectionLanding(entry, target));
+    if (lessonMetadata(data)) return matchesId(data.Value.Id, target.lesson) && matchesId(data.Value.Book?.Id, target.book);
+    if (!exerciseDefinitions(data)) return false;
+    const { SectionId, Items } = data.Value;
+    if (SectionId !== undefined && !matchesId(SectionId, target.section)) return false;
+    return (SectionId !== undefined || Items.length > 0) && Items.every(item => {
+      const ids = [item.SectionId, item.LessonSectionId].filter(id => id !== undefined);
+      return (SectionId !== undefined || ids.length > 0) && ids.every(id => matchesId(id, target.section));
+    });
+  }
+
+  function deliver(kind, url, raw, { page, epoch, revision }, observeRpc) {
     if (epoch !== captureEpoch) return;
     if (!observing() || !materialPage() || !allowedEndpoint(url)) return;
     let parsed = raw;
     try {
-      if (page !== location.href) { postIssue('bootstrap_navigation_changed', page, epoch); return; }
       if (typeof raw === 'string') {
         if (raw.length > MAX_BYTES || new TextEncoder().encode(raw).byteLength > MAX_BYTES) {
           postIssue('response_too_large', page, epoch);
@@ -358,8 +314,15 @@
         parsed = JSON.parse(raw.replace(/^\x1e|\x1e$/g, ''));
       }
       if (!isMaterialData(parsed)) return;
-      const data = clean(parsed);
+      const data = captureData(parsed);
       if (!isMaterialData(data)) return;
+      if (page !== location.href || routeRevision !== revision) {
+        const landing = sectionLanding(page, revision);
+        if (!landing || !confirmsSectionLanding(parsed, landing)) {
+          postIssue('bootstrap_navigation_changed', page, epoch);
+          return;
+        }
+      }
       const text = JSON.stringify(data);
       if (text.length > MAX_BYTES || new TextEncoder().encode(text).byteLength > MAX_BYTES) {
         postIssue('response_too_large', page, epoch);
@@ -367,7 +330,7 @@
       }
       const sanitizedUrl = safeUrl(url);
       if (!sanitizedUrl) return;
-      accept({ kind, url: sanitizedUrl, receivedAt: new Date().toISOString(), data }, page);
+      accept({ kind, url: sanitizedUrl, receivedAt: new Date().toISOString(), data });
     } catch (error) {
       if (ISSUE_CODES.has(error?.captureCode)) postIssue(error.captureCode, page, epoch);
       // Unsupported/binary/non-JSON messages are not material exports.
@@ -392,12 +355,13 @@
 
   // A same-document round trip can otherwise leave the old opening's proof
   // alive when it happens entirely between two navigation polls.
-  const routeUrl = () => `${location.origin}${location.pathname}`;
-  let previousRoute = routeUrl();
   function navigationChanged() {
     const next = routeUrl(), from = previousRoute;
+    if (from === next) return;
+    routeRevision++;
+    routeFrom = from;
     previousRoute = next;
-    if (from !== next && stateKnown && enabled && channel && materialPage()) {
+    if (stateKnown && enabled && channel && materialPage()) {
       window.postMessage({ source: CHANNEL_SOURCE, direction: 'navigation', channel, revision: channelRevision, from, to: next }, location.origin);
     }
   }
@@ -416,21 +380,19 @@
   if (typeof originalFetch === 'function') {
     window.fetch = function (...args) {
       const requestUrl = typeof args[0] === 'string' || args[0] instanceof URL ? String(args[0]) : args[0]?.url;
-      const responsePage = location.href;
-      const responseEpoch = captureEpoch;
+      const scope = responseScope();
       const requestObserved = observing();
       const finished = trackRequest(requestUrl);
       let promise;
       try { promise = Reflect.apply(originalFetch, this, args); }
       catch (error) { finished(); throw error; }
       promise.then(response => {
-        if (!requestObserved || responseEpoch !== captureEpoch || !observing() || !materialPage() || !allowedEndpoint(response.url || requestUrl)) return;
-        if (responsePage !== location.href) { postIssue('bootstrap_navigation_changed', responsePage, responseEpoch); return; }
+        if (!requestObserved || scope.epoch !== captureEpoch || !observing() || !materialPage() || !allowedEndpoint(response.url || requestUrl)) return;
         const type = response.headers?.get('content-type') || '';
         const length = Number(response.headers?.get('content-length') || 0);
         if (!/json/i.test(type) && !/\/(?:materials?|books?|lessons?|exercises?|sections?)(?:\/|\?|$)/i.test(requestUrl || '')) return;
-        if (length > MAX_BYTES) { postIssue('response_too_large', responsePage, responseEpoch); return; }
-        // Read at most 1 MiB from a clone; do not buffer arbitrarily large responses.
+        if (length > MAX_BYTES) { postIssue('response_too_large', scope.page, scope.epoch); return; }
+        // Bound the clone so responses can be classified across a route change.
         const clone = response.clone();
         if (!clone.body?.getReader) return;
         const reader = clone.body.getReader();
@@ -441,19 +403,14 @@
           try {
             while (true) {
               const part = await reader.read();
-              if (responseEpoch !== captureEpoch || !observing()) { void reader.cancel().catch(() => {}); return; }
-              if (responsePage !== location.href) {
-                postIssue('bootstrap_navigation_changed', responsePage, responseEpoch);
-                void reader.cancel().catch(() => {});
-                return;
-              }
+              if (scope.epoch !== captureEpoch || !observing()) { void reader.cancel().catch(() => {}); return; }
               if (part.done) break;
               bytes += part.value.byteLength;
-              if (bytes > MAX_BYTES) { postIssue('response_too_large', responsePage, responseEpoch); void reader.cancel().catch(() => {}); return; }
+              if (bytes > MAX_BYTES) { postIssue('response_too_large', scope.page, scope.epoch); void reader.cancel().catch(() => {}); return; }
               text += decoder.decode(part.value, { stream: true });
             }
             text += decoder.decode();
-            deliver('fetch', response.url || requestUrl, text, responsePage, responseEpoch);
+            deliver('fetch', response.url || requestUrl, text, scope);
           } catch { /* Response stream can be aborted by the application. */ }
         })();
       }).catch(() => {}).finally(finished);
@@ -470,17 +427,16 @@
       return Reflect.apply(originalOpen, this, args);
     };
     window.XMLHttpRequest.prototype.send = function (...args) {
-      const responsePage = location.href;
-      const responseEpoch = captureEpoch;
+      const scope = responseScope();
       const requestObserved = observing();
       const finished = trackRequest(xhrUrls.get(this));
       this.addEventListener('loadend', () => {
         finished();
         const url = this.responseURL || xhrUrls.get(this);
-        if (!requestObserved || responseEpoch !== captureEpoch || !observing() || !materialPage() || !allowedEndpoint(url)) return;
+        if (!requestObserved || scope.epoch !== captureEpoch || !observing() || !materialPage() || !allowedEndpoint(url)) return;
         try {
-          if (this.responseType === 'json') deliver('xhr', url, this.response, responsePage, responseEpoch);
-          else if (this.responseType === '' || this.responseType === 'text') deliver('xhr', url, this.responseText, responsePage, responseEpoch);
+          if (this.responseType === 'json') deliver('xhr', url, this.response, scope);
+          else if (this.responseType === '' || this.responseType === 'text') deliver('xhr', url, this.responseText, scope);
         } catch { /* Reading unsupported response types can throw. */ }
       }, { once: true });
       try { return Reflect.apply(originalSend, this, args); }
@@ -517,16 +473,15 @@
         socket.addEventListener('error', close);
         socket.addEventListener('message', event => {
           if (!observing() || !materialPage() || !allowedEndpoint(url)) return;
-          const responsePage = location.href;
-          const responseEpoch = captureEpoch;
+          const scope = responseScope();
           const finish = parsed => finishSocketRequests(state, parsed);
-          if (typeof event.data === 'string') deliver('websocket', url, event.data, responsePage, responseEpoch, finish);
+          if (typeof event.data === 'string') deliver('websocket', url, event.data, scope, finish);
           else if (event.data instanceof ArrayBuffer) {
-            if (event.data.byteLength > MAX_BYTES) postIssue('response_too_large', responsePage, responseEpoch);
-            else deliver('websocket', url, new TextDecoder().decode(event.data), responsePage, responseEpoch, finish);
+            if (event.data.byteLength > MAX_BYTES) postIssue('response_too_large', scope.page, scope.epoch);
+            else deliver('websocket', url, new TextDecoder().decode(event.data), scope, finish);
           } else if (typeof Blob !== 'undefined' && event.data instanceof Blob) {
-            if (event.data.size > MAX_BYTES) postIssue('response_too_large', responsePage, responseEpoch);
-            else void event.data.text().then(text => deliver('websocket', url, text, responsePage, responseEpoch, finish)).catch(() => {});
+            if (event.data.size > MAX_BYTES) postIssue('response_too_large', scope.page, scope.epoch);
+            else void event.data.text().then(text => deliver('websocket', url, text, scope, finish)).catch(() => {});
           }
         });
         return socket;

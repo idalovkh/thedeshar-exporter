@@ -68,5 +68,6 @@ export function createExporterBinding(chrome) {
     if (known) revoked.set(tabId, known.documentId);
     documents.delete(tabId);
   }
-  return Object.freeze({ isDashboard, matches, requireOwner, isOwner, invalidate });
+  return Object.freeze({ isDashboard, matches, requireOwner, isOwner, invalidate,
+    navigationStarted(tabId) { invalidate(tabId, { status: 'loading' }); } });
 }

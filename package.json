@@ -1,7 +1,7 @@
 {
   "name": "exporter",
   "private": true,
-  "version": "0.3.44",
+  "version": "1.0.3",
   "type": "module",
   "description": "Standalone Manifest V3 material export extension",
   "scripts": {

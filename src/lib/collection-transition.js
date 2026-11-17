@@ -1,5 +1,7 @@
 import { MAX_TRANSITION_ATTEMPTS, TRANSITION_RETRY_AFTER_MS, TRANSITION_RETRY_DELAYS_MS, TRANSITION_TIMEOUT_MS } from './source-transition-policy.js';
 import { sourceStatusError } from './source-navigation-errors.js';
+import { observeSourceProgress } from './source-progress.js';
+import { SOURCE_STALL_MS, SOURCE_RECOVERY_STALL_MS, DEFINITION_RETRY_WAIT_MS } from './source-transition-policy.js';
 
 const STOP_STATES = new Set(['other_book', 'source_changed', 'security_error', 'interrupted', 'closed']);
 const SOURCE_STATES = new Set(['loading', 'same_book', 'other_book', 'source_changed', 'network_error', 'security_error', 'interrupted', 'unavailable', 'closed']);
@@ -9,7 +11,8 @@ export function createCollectionTransition({ request, now, wait, signal,
   timeoutMs = TRANSITION_TIMEOUT_MS, attemptTimeoutMs = TRANSITION_RETRY_AFTER_MS,
   retryDelaysMs = TRANSITION_RETRY_DELAYS_MS } = {}) {
   const startedAt = now();
-  let spent = 0, attemptStarted = 0, descriptor;
+  let spent = 0, descriptor;
+  let progress = observeSourceProgress(null, null, 0), requestTried = false, requestWaiting = false;
   const elapsed = () => Math.max(spent, now() - startedAt);
   const check = () => {
     if (signal?.aborted) throw new DOMException('Обход остановлен.', 'AbortError');
@@ -85,10 +88,39 @@ export function createCollectionTransition({ request, now, wait, signal,
     const previousAttempt = descriptor.attempt;
     accept(response.transition);
     if (descriptor.attempt !== previousAttempt + 1) throw Object.assign(new Error('Не удалось подтвердить повторную загрузку страницы.'), { code: 'source_changed' });
-    attemptStarted = elapsed();
+    progress = observeSourceProgress(null, null, elapsed());
     return response;
   }
-  return Object.freeze({ run, pause, status, retry, accept, remaining,
-    attemptRemaining: () => Math.min(remaining(), Math.max(0, attemptTimeoutMs - (elapsed() - attemptStarted))),
+  async function recoverInner(reason) {
+    check();
+    if (!descriptor || descriptor.attempt >= MAX_TRANSITION_ATTEMPTS || !remaining()) return null;
+    const current = await status();
+    if (!['loading', 'same_book', 'network_error'].includes(current.state)) return null;
+    if (descriptor.attempt === 1 && !requestTried) {
+      const result = await run(() => request('RETRY_DEFINITION_REQUEST', { transitionId: descriptor.id,
+        sourceTimeoutMs: Math.min(10_000, remaining()) }));
+      requestTried = true;
+      if (result.retried) {
+        requestWaiting = true; progress = observeSourceProgress(null, null, elapsed());
+        return { ...result, recovery: 'request', reloaded: false };
+      }
+    }
+    const previousAttempt = descriptor.attempt;
+    const result = await run(() => request(previousAttempt === 1 ? 'RETRY_SOURCE_NAVIGATION' : 'REPLACE_SOURCE_TAB', {
+      transitionId: descriptor.id, reason, stalled: true, sourceTimeoutMs: Math.min(10_000, remaining()) }));
+    accept(result.transition);
+    if (descriptor.attempt !== previousAttempt + 1) throw Object.assign(new Error('Не удалось подтвердить восстановление страницы.'), { code: 'source_changed' });
+    requestWaiting = false; progress = observeSourceProgress(null, null, elapsed());
+    return { ...result, recovery: previousAttempt === 1 ? 'reload' : 'replace', definitionRetrySkipped: previousAttempt === 1 };
+  }
+  async function recover(reason) {
+    try { return await recoverInner(reason); }
+    catch (error) { if (error.code === 'source_loading') return null; throw error; }
+  }
+  return Object.freeze({ run, pause, status, retry, recover, accept, remaining,
+    progress: navigation => { progress = observeSourceProgress(progress, navigation, elapsed()); },
+    idleMs: () => Math.max(0, elapsed() - progress.at),
+    attemptRemaining: () => Math.min(remaining(), Math.max(0, (requestWaiting ? DEFINITION_RETRY_WAIT_MS :
+      descriptor?.attempt > 1 ? Math.min(SOURCE_RECOVERY_STALL_MS, attemptTimeoutMs) : Math.min(SOURCE_STALL_MS, attemptTimeoutMs)) - (elapsed() - progress.at))),
     elapsed, attempt: () => descriptor?.attempt || 1, id: () => descriptor?.id });
 }

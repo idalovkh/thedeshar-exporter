@@ -13,7 +13,7 @@ export const isLessonBootstrapUrl = value => landingRoute(value)?.stage < 2;
 
 /** Only the selected lesson's unfinished router landing can advance to its first section. */
 export function canAdvanceLessonLanding(intent, value, documentId) {
-  if (intent.command?.type !== 'OPEN_MATERIAL_ITEM' || intent.target?.kind !== 'lesson' ||
+  if (!['OPEN_MATERIAL_ITEM', 'OPEN_CONFIRMED_LESSON'].includes(intent.command?.type) || intent.target?.kind !== 'lesson' ||
     intent.phase !== 'committed' || !documentId || documentId !== intent.browserDocumentId) return false;
   const previous = landingRoute(intent.observedUrl), next = landingRoute(value);
   if (!previous || !next || previous.stage >= 2 || next.stage <= previous.stage ||

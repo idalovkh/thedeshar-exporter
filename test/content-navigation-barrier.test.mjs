@@ -105,7 +105,7 @@ test('an authoritative stop remains synchronous and cancels a navigation waiting
   assert.deepEqual(app.actions, []);
 });
 
-for (const type of ['PREPARE_BOOK', 'OPEN_MATERIAL_ITEM', 'PAGE_SNAPSHOT']) {
+for (const type of ['PREPARE_BOOK', 'OPEN_MATERIAL_ITEM', 'OPEN_CONFIRMED_LESSON', 'PAGE_SNAPSHOT']) {
   test(`queued ${type} cannot act after an authoritative stop`, async () => {
     const app = await source();
     app.page.history.pushState({}, '', concrete);
@@ -219,4 +219,13 @@ test('a browser without the native navigation guard cannot expose unchecked sour
   await assert.rejects(app.visit.flush(), error => error.code === 'source_update_required');
   assert.equal(app.queued.length, 0);
   assert.equal(app.timers.size, 0);
+});
+
+test('a confirmed lesson command without a document token is rejected before navigation', async () => {
+  const app = await source();
+  const response = app.command({ type: 'OPEN_CONFIRMED_LESSON', expectedUrl: contents,
+    url: `${origin}/lesson-editor/book/1153358/lesson/18601240` });
+  assert.equal(response.ok, false);
+  assert.equal(response.code, 'source_changed');
+  assert.deepEqual(app.actions, []);
 });

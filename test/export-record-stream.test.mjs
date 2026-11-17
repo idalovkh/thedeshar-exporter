@@ -40,6 +40,31 @@ test('raw records are spooled one at a time while package metadata and bytes sta
   assert.ok(input.requests.filter(request => request.type === 'GET_EXPORT_RECORDS').every(request => request.limit === 1));
 });
 
+test('VK iframe embeds stay in archived exercise data and out of the download inventory', async () => {
+  const input = fixture();
+  const iframe = '<iframe src="https://vkvideo.ru/video_ext.php?oid=-42&amp;id=73" allowfullscreen></iframe>';
+  const serializedIframe = '  <iframe src="https://vk.com/video_ext.php?oid=-42&amp;id=74"></iframe>';
+  const mp4 = 'https://cdn.example.org/lesson.mp4';
+  const capture = input.captures[0];
+  capture.pageUrl = 'https://progressme.ru/lesson-editor/book/71/lesson/2/section/3';
+  capture.data = {
+    Class: 'GetExerciseWsController', Method: 'LoadExercises', IsSuccess: true,
+    Value: { Items: [
+      { Id: 1, Type: 3, Videos: [{ Link: iframe }, { Link: mp4 }] },
+      { Id: 2, Type: 3, JsonData: JSON.stringify({ Videos: [{ Link: serializedIframe }] }) },
+    ] },
+  };
+
+  const result = await prepareDiskExport(input.summary, input);
+  const raw = result.prepared.entries.find(entry => entry.name === 'originals/responses/00001.json');
+  const [video, serialized] = JSON.parse(await raw.data.text()).data.Value.Items;
+  assert.deepEqual(video.Videos, [{ Link: iframe }, { Link: mp4 }]);
+  assert.deepEqual(JSON.parse(serialized.JsonData).Videos, [{ Link: serializedIframe }]);
+  const expectedAssets = ['https://cdn.example.org/a.mp3', 'https://cdn.example.org/cover.png', mp4];
+  assert.deepEqual(result.assets.map(asset => asset.url).sort(), expectedAssets);
+  assert.deepEqual(result.prepared.manifest.inventory.assets.map(asset => asset.url).sort(), expectedAssets);
+});
+
 test('bounded record writes preserve unicode across chunk boundaries', async () => {
   const input = fixture();
   input.snapshots[0].blocks[0].text = '😀'.repeat(400000);

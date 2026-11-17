@@ -2,6 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sourceConnectionView, collectionLoadingDetail, collectionFailureNotice, sourceSetupMessage } from '../src/ui/source-status-view.js';
 
+test('a stopped collection explains a known navigation blocker', () => {
+  const diagnostics = { failure: { reason: 'navigation_blocked', blockedReasonCode: 'pagination' } };
+  assert.match(collectionFailureNotice({ diagnostics }), /пагинация или подгрузка/i);
+});
+
 test('an unknown or failed source is never presented as another book', () => {
   const view = sourceConnectionView({ expectedKey: 'https://school.example/book/1', sourceKey: '',
     sourceStatus: { state: 'network_error', networkError: 'net::ERR_TIMED_OUT' } });

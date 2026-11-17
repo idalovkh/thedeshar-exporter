@@ -7,6 +7,8 @@ const MAX_SOURCE_EDGE = 16_384;
 
 export function imagePreparationError(reason) {
   const messages = {
+    image_dimensions_invalid: 'Получены некорректные размеры или структура изображения.',
+    invalid_png: 'Получен повреждённый PNG-файл.',
     image_dimensions_unverified: 'Не удалось проверить разрешение изображения для Full HD.',
     image_dimensions_limit: 'Изображение слишком большое для безопасного уменьшения до Full HD.',
     image_webp_failed: 'Не удалось подготовить изображение в формате WebP.',

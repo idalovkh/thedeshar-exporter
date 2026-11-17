@@ -10,14 +10,17 @@ import { fileURLToPath } from 'node:url';
 import * as simpleFixture from './collection-navigation-fixture.mjs';
 import { lessonEntryFixture } from './lesson-entry-fixture.mjs';
 import { probeNavigationAPI } from './navigation-api-probe.mjs';
+import { confirmedLessonsFixture } from './confirmed-lessons-fixture.mjs';
+import { resumeCollectionFixture } from './resume-collection-fixture.mjs';
+import { resumeLessonFixture } from './resume-lesson-fixture.mjs';
 
 const output = path.resolve(process.argv[2] || '');
 const source = path.resolve(process.argv[3] || fileURLToPath(new URL('../..', import.meta.url)));
 const caseName = process.argv[4] || 'race';
 assert.ok(output.startsWith('/private/tmp/') && process.argv.length >= 3 && process.argv.length <= 5,
-  'Usage: node test/acceptance/collection-navigation-chrome.mjs /private/tmp/OUTPUT [SOURCE_DIRECTORY] [race|slow|network|manual|lesson-before|lesson-after|lesson-manual|api-probe]');
-assert.ok(['race', 'slow', 'network', 'manual', 'lesson-before', 'lesson-after', 'lesson-manual', 'api-probe'].includes(caseName));
-const fixture = lessonEntryFixture(caseName) || simpleFixture;
+  'Usage: node test/acceptance/collection-navigation-chrome.mjs /private/tmp/OUTPUT [SOURCE_DIRECTORY] [race|slow|network|manual|lesson-before|lesson-after|lesson-crossing|lesson-crossing-mismatch|lesson-manual|api-probe|confirmed-lessons|confirmed-lessons-fallback|resume-confirmed|resume-from-lesson]');
+assert.ok(['race', 'slow', 'network', 'manual', 'lesson-before', 'lesson-after', 'lesson-crossing', 'lesson-crossing-mismatch', 'lesson-manual', 'api-probe', 'confirmed-lessons', 'confirmed-lessons-fallback', 'resume-confirmed', 'resume-from-lesson'].includes(caseName));
+const fixture = resumeLessonFixture(caseName) || resumeCollectionFixture(caseName) || confirmedLessonsFixture(caseName) || lessonEntryFixture(caseName) || simpleFixture;
 const { fixtureBook, fixtureOrigin, fixtureSection, fixtureHTML, fixtureJSON } = fixture;
 await mkdir(output, { mode: 0o700 });
 const temporary = await mkdtemp(path.join(tmpdir(), 'thedeshar-collection-navigation-'));
@@ -138,9 +141,13 @@ try {
       if (session !== sourceSession) return;
       const url = new URL(request.request.url);
       if (url.origin !== fixtureOrigin) { await cdp.call('Fetch.failRequest', { requestId: request.requestId, errorReason: 'BlockedByClient' }, session); return; }
-      const data = fixtureJSON(url.pathname);
+      const data = fixtureJSON(url.pathname, scenario);
       if (data) {
         scenario.authorRequests++;
+        if (fixture.deferJSON?.(url.pathname, scenario)) {
+          (scenario.deferredAuthorRequests ||= []).push(request.requestId);
+          return;
+        }
         await cdp.call('Fetch.fulfillRequest', { requestId: request.requestId, responseCode: 200,
           responseHeaders: [{ name: 'Content-Type', value: 'application/json' }], body: Buffer.from(JSON.stringify(data)).toString('base64') }, session);
         return;
@@ -197,6 +204,41 @@ try {
     scenario.collecting = true;
     const started = performance.now();
     await evaluate(dashboardSession, 'document.querySelector("#collect-book").click(); true', true);
+    if (scenario.resumeCollection) {
+      scenario.beforeResume = await until(async () => {
+        const state = (await readState()).state;
+        return state.collection?.resume?.confirmed?.some(page => page.url === fixtureSection) ? state : false;
+      }, 'The shipping collector did not persist the first section');
+      await until(() => scenario.deferredAuthorRequests?.length, 'The incomplete second section was not held');
+      await evaluate(dashboardSession, 'document.querySelector("#cancel-collection").click(); true', true);
+      const stopped = await until(async () => {
+        const response = await readState();
+        if (!response.ok && response.code === 'stale_collection') return false;
+        assert.equal(response.ok, true, response.error);
+        const state = response.state;
+        return state.collection?.status === 'cancelled' && !state.enabled ? state : false;
+      }, 'The shipping stop button did not retain an interrupted collection');
+      assert.equal(stopped.collection.resume.confirmed.length, 1);
+      scenario.stoppedStatus = stopped.collection.status;
+      scenario.stoppedSourceUrl = await evaluate(sourceSession, 'location.href');
+      scenario.resumePhase = 'resuming';
+      for (const requestId of scenario.deferredAuthorRequests) {
+        await cdp.call('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, sourceSession).catch(() => {});
+      }
+      if (!scenario.resumeFromLesson) {
+        await cdp.call('Page.navigate', { url: fixtureBook }, sourceSession);
+        await until(() => evaluate(sourceSession, 'document.readyState === "complete" && document.querySelector(".unit_li") !== null'), 'Source did not return to contents after stop');
+      }
+      scenario.resumeSourceBeforeClick = await evaluate(sourceSession, 'location.href');
+      scenario.resumeDocumentRequestIndex = scenario.documentRequests.length;
+      await until(() => evaluate(dashboardSession, 'Boolean(!document.querySelector("#collect-book").hidden && !document.querySelector("#collect-book").disabled && document.querySelector("#collect-label").textContent.trim() === "Продолжить сбор")'),
+        'The shipping dashboard did not offer saved collection continuation');
+      scenario.continueBeforeClick = await evaluate(dashboardSession, `({hidden:document.querySelector('#collect-book').hidden,
+        disabled:document.querySelector('#collect-book').disabled,label:document.querySelector('#collect-label').textContent.trim()})`);
+      await evaluate(dashboardSession, 'document.querySelector("#collect-book").click(); true', true);
+      await until(async () => ['running', 'finished', 'failed'].includes((await readState()).state.collection?.status),
+        'The shipping continue button did not start a resume collection');
+    }
     if (scenario.manualSection) {
       scenario.beforeManualSection = await until(async () => {
         const stored = await sessions();
@@ -263,6 +305,14 @@ try {
       scenario.downloadedReport = downloaded;
       report.cases.push({ name: scenario.name, passed: true, elapsedMs: scenario.elapsedMs,
         cause: failure.navigation.cause, report: downloaded });
+      await cdp.call('Target.closeTarget', { targetId: dashboardTarget });
+      continue;
+    }
+    if (fixture.validateStopped) {
+      assert.equal(result.collection.status, 'failed');
+      fixture.validateStopped(result, scenario);
+      assert.equal(await evaluate(dashboardSession, 'document.querySelector("#export").hidden || document.querySelector("#export").disabled'), true);
+      report.cases.push({ name: scenario.name, passed: true, elapsedMs: scenario.elapsedMs, dropped: result.dropped });
       await cdp.call('Target.closeTarget', { targetId: dashboardTarget });
       continue;
     }

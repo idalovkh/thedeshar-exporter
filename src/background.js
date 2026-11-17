@@ -18,6 +18,9 @@ import { hydrateSourceOrigins } from './lib/source-origins.js';
 import { prepareSourceSite } from './lib/source-site-registration.js';
 import { createExporterBinding } from './lib/exporter-binding.js';
 import { exporterBindingDiagnostic } from './lib/exporter-binding-diagnostics.js';
+import { collectionResumeInfo } from './lib/collection-resume.js';
+import { observePreservedCapture } from './lib/resume-capture.js';
+import { createSourceTabRecovery } from './lib/source-tab-recovery.js';
 
 export function installBackground(chrome, { readWorkspace: readStored = readPersistent, updateWorkspace: updateStored = updatePersistent,
   releaseWorkspace: releaseStored = readStored === readPersistent ? releasePersistent : () => {},
@@ -36,7 +39,8 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
   const leasePersistence = new Map();
   const sourceOriginsReady = hydrateSourceOrigins(chrome);
   const problemReports = createProblemReportStore({ sessionStorage: chrome.storage.session });
-  const catalogue = createBookWorkspaces({ storage: chrome.storage.session, listLegacy: listStored });
+  const catalogue = createBookWorkspaces({ storage: chrome.storage.local || chrome.storage.session,
+    sessionStorage: chrome.storage.session, listLegacy: listStored });
   const epochOf = tabId => epochs.get(tabId) || 0;
   const stale = (code = 'stale_collection') => Object.assign(new Error(code === 'stale_capture'
     ? 'Этот ответ относится к предыдущему сбору и не сохранён.'
@@ -130,8 +134,8 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
   const leaseKey = tabId => `collection:${tabId}`;
   const ownerKey = tabId => `collection-owner:${tabId}`;
   const pending = new Map();
-  const runMutations = new Set(['END_COLLECTION', 'SAVE_COLLECTION', 'START_CAPTURE', 'STOP_CAPTURE', 'CLEAR_CAPTURE', 'TAKE_SNAPSHOT', 'PREPARE_BOOK', 'OPEN_MATERIAL_ITEM', 'NAVIGATE_SOURCE', 'RETRY_SOURCE_NAVIGATION']);
-  const mutations = new Set(['BEGIN_COLLECTION', 'END_COLLECTION', 'SAVE_COLLECTION', 'START_CAPTURE', 'STOP_CAPTURE', 'CLEAR_CAPTURE', 'RESET_CAPTURE', 'RECONNECT_SOURCE', 'TAKE_SNAPSHOT', 'PREPARE_BOOK', 'OPEN_MATERIAL_ITEM', 'NAVIGATE_SOURCE', 'RETRY_SOURCE_NAVIGATION', 'BEGIN_PROBLEM_REPORT', 'APPEND_PROBLEM_EVENTS']);
+  const runMutations = new Set(['END_COLLECTION', 'SAVE_COLLECTION', 'START_CAPTURE', 'STOP_CAPTURE', 'CLEAR_CAPTURE', 'TAKE_SNAPSHOT', 'PREPARE_BOOK', 'OPEN_MATERIAL_ITEM', 'OPEN_CONFIRMED_LESSON', 'NAVIGATE_SOURCE', 'RETRY_SOURCE_NAVIGATION', 'RETRY_DEFINITION_REQUEST', 'PREPARE_SOURCE_REPLACEMENT']);
+  const mutations = new Set(['BEGIN_COLLECTION', 'END_COLLECTION', 'SAVE_COLLECTION', 'START_CAPTURE', 'STOP_CAPTURE', 'CLEAR_CAPTURE', 'RESET_CAPTURE', 'RECONNECT_SOURCE', 'TAKE_SNAPSHOT', 'PREPARE_BOOK', 'OPEN_MATERIAL_ITEM', 'OPEN_CONFIRMED_LESSON', 'NAVIGATE_SOURCE', 'RETRY_SOURCE_NAVIGATION', 'RETRY_DEFINITION_REQUEST', 'PREPARE_SOURCE_REPLACEMENT', 'BEGIN_PROBLEM_REPORT', 'APPEND_PROBLEM_EVENTS']);
   const issueWarnings = Object.freeze({
     response_too_large: 'Ответ с учебным материалом превышает допустимый размер и не сохранён. Полнота архива не подтверждена.',
     response_too_complex: 'Ответ с учебным материалом слишком сложный и не сохранён. Полнота архива не подтверждена.',
@@ -156,8 +160,12 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
     return value;
   };
   const exporterBinding = createExporterBinding(chrome);
-  const isOwnerTab = exporterBinding.isOwner;
+  let sourceTabRecovery;
+  const isOwnerTab = async (...args) => await exporterBinding.isOwner(...args) || Boolean(await sourceTabRecovery?.alternateOwner(...args));
   const isDashboard = exporterBinding.isDashboard;
+  chrome.webNavigation?.onBeforeNavigate?.addListener(event => {
+    if (event.frameId === 0) exporterBinding.navigationStarted(event.tabId);
+  });
   const requireOwner = async (sender, sourceTabId, workspaceId, operation) => {
     const epoch = epochOf(sourceTabId);
     try { return await exporterBinding.requireOwner(sender.tab?.id, sourceTabId, workspaceId, { sender, operation }); }
@@ -183,6 +191,41 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
       if (intent.workspaceId && (await catalogue.get(intent.workspaceId))?.bookKey !== intent.bookKey) throw stale();
       assertEpoch(intent.tabId, epoch);
       return () => assertEpoch(intent.tabId, epoch);
+    } });
+
+  const revokeRecoverySource = async tabId => {
+    epochs.set(tabId, epochOf(tabId) + 1);
+    controllers.get(tabId)?.abort(); controllers.delete(tabId);
+    captureIds.set(tabId, null);
+    await Promise.all([sessionKey(tabId), captureKey(tabId)].map(key => chrome.storage.session.remove(key)));
+  };
+  sourceTabRecovery = createSourceTabRecovery({ chrome, navigation: sourceNavigation, exporterBinding, catalogue,
+    readLease: leaseRecord, revoke: revokeRecoverySource,
+    async activate(record) {
+      for (const tabId of [record.oldTabId, record.newTabId]) {
+        const current = await leaseRecord(tabId);
+        if (current && current.collectionId !== record.collectionId) throw stale();
+      }
+      const lease = { ...record.lease, storageId: record.lease.storageId ?? record.oldTabId };
+      await chrome.storage.session.set({ [leaseKey(record.newTabId)]: lease, [ownerKey(record.ownerTabId)]: record.newTabId,
+        [sessionKey(record.newTabId)]: true, [captureKey(record.newTabId)]: record.captureId });
+      captureIds.set(record.newTabId, record.captureId); begunLeases.set(record.newTabId, lease);
+      await catalogue.update(record.workspaceId, { sourceTabId: record.newTabId });
+      begunLeases.delete(record.oldTabId); collectionIntents.delete(record.oldTabId);
+      await chrome.storage.session.remove(leaseKey(record.oldTabId));
+    },
+    async rollback(record) {
+      for (const tabId of [record.oldTabId, record.newTabId]) {
+        const current = await leaseRecord(tabId);
+        if (current && current.collectionId !== record.collectionId) return;
+      }
+      for (const tabId of [record.oldTabId, record.newTabId]) {
+        begunLeases.delete(tabId); collectionIntents.delete(tabId);
+        await chrome.storage.session.remove(leaseKey(tabId));
+      }
+      await chrome.storage.session.remove(ownerKey(record.ownerTabId));
+      const state = await updateWorkspace(record.lease.storageId ?? record.oldTabId, cancelledCollection);
+      await catalogue.update(record.workspaceId, { state });
     } });
 
   async function captureIdFor(tabId) {
@@ -357,6 +400,7 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
     exporterBinding.invalidate(tabId);
     void sourceNavigation.clear(tabId).catch(() => {});
     const cleanup = async () => {
+      await sourceTabRecovery.discard(tabId);
       const ownedSource = (await chrome.storage.session.get(ownerKey(tabId)))[ownerKey(tabId)];
       try {
         if (Number.isInteger(ownedSource)) {
@@ -388,9 +432,10 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
   });
   chrome.tabs.onUpdated?.addListener((tabId, changeInfo) => {
     if (!changeInfo.url && !['loading', 'complete'].includes(changeInfo.status)) return;
-    exporterBinding.invalidate(tabId, changeInfo);
-    if (!changeInfo.url && changeInfo.status !== 'loading') return;
     const cleanup = async () => {
+      if (!await sourceTabRecovery.acceptsOwnerUrl(tabId, changeInfo)) exporterBinding.invalidate(tabId, changeInfo);
+      if (!changeInfo.url && changeInfo.status !== 'loading') return;
+      await sourceTabRecovery.discard(tabId);
       const sourceTabId = (await chrome.storage.session.get(ownerKey(tabId)))[ownerKey(tabId)];
       if (!Number.isInteger(sourceTabId)) return;
       await enqueue(sourceTabId, async () => {
@@ -587,7 +632,12 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
             warnings: [...new Set([...(state.warnings || []), warning])], updatedAt: new Date().toISOString() };
         }
         const before = state.dropped || 0;
-        const incoming = redactSensitive({ ...message.event, pageUrl });
+        const incoming = { ...message.event, pageUrl };
+        const preserved = observePreservedCapture(state, incoming, { resume: lease.mode === 'resume' });
+        if (preserved) {
+          exerciseCapture = preserved.exerciseCapture;
+          return preserved.state;
+        }
         const next = appendCapture(state, incoming);
         if ((next.dropped || 0) === before && ['fetch', 'xhr', 'websocket'].includes(incoming.kind) && classifyMaterialPayload(incoming)) {
           exerciseCapture = exerciseCaptureObservation(incoming, pageUrl, next.captures);
@@ -628,6 +678,8 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
     }
     switch (message.type) {
       case 'BEGIN_COLLECTION': {
+        if (sourceTabRecovery.busy(sender.tab?.id)) throw Object.assign(new Error('Дождитесь завершения переноса вкладки и повторите сбор.'), { code: 'source_loading' });
+        if (message.mode !== undefined && !['new', 'resume'].includes(message.mode)) throw new Error('Неизвестный режим сбора.');
         const ownerTabId = sender.tab?.id;
         if (!Number.isInteger(ownerTabId) || ownerTabId <= 0) throw new Error('Обход должен запускаться из вкладки экспортера.');
         await requireOwner(sender, tabId, workspace?.workspaceId, message.type);
@@ -637,8 +689,15 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
         const previousPersistence = leasePersistence.get(tabId);
         if (previousPersistence) await previousPersistence;
         assertPreflight();
+        if (message.mode === 'resume') {
+          const retained = await readWorkspace(storageId);
+          if (retained.collection?.status === 'finished' || retained.dropped || !collectionResumeInfo(retained).available || sourceBookKey(retained.collection?.rootUrl) !== sourceBookKey(currentSource.url)) {
+            throw Object.assign(new Error('Нет подтверждённого сохранённого сбора этой книги для продолжения.'), { code: 'resume_unavailable' });
+          }
+          assertPreflight();
+        }
         const collectionId = lease?.collectionId || crypto.randomUUID();
-        const scoped = { ownerTabId, ownerDocumentId: sender.documentId, collectionId, bookKey: workspace?.bookKey || sourceBookKey(currentSource.url),
+        const scoped = { ownerTabId, ownerDocumentId: sender.documentId, collectionId, mode: message.mode === 'resume' ? 'resume' : 'new', bookKey: workspace?.bookKey || sourceBookKey(currentSource.url),
           ...(message.requestId ? { requestId: message.requestId } : {}), ...(workspace ? { workspaceId: workspace.workspaceId, storageId } : {}) };
         begunLeases.set(tabId, scoped);
         const persisted = chrome.storage.session.set({ [leaseKey(tabId)]: scoped, [ownerKey(ownerTabId)]: tabId }).then(async () => {
@@ -654,6 +713,8 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
       }
       case 'END_COLLECTION': {
         if (lease) await releaseLease(tabId, lease, 'Обход остановлен. Сохранённые данные доступны для скачивания.', expectedEpoch);
+        const recovery = await sourceTabRecovery.read(sender.tab?.id);
+        if (recovery && recovery.phase !== 'aborted' && recovery.collectionId === message.collectionId) return sourceTabRecovery.abort(message, sender);
         return { ok: true };
       }
       case 'GET_SOURCE': return { ok: true, source: await source(tabId) };
@@ -666,8 +727,20 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
       case 'RETRY_SOURCE_NAVIGATION': {
         if (!lease) throw stale();
         await requireOwner(sender, tabId, workspace?.workspaceId, message.type);
-        return await sourceNavigation.retry({ tabId, ownerTabId: sender.tab?.id, collectionId: lease.collectionId,
+        return await sourceNavigation[message.stalled ? 'recoverStalled' : 'retry']({ tabId, ownerTabId: sender.tab?.id, collectionId: lease.collectionId,
           workspaceId: workspace?.workspaceId, bookKey: workspace?.bookKey || lease.bookKey }, message.transitionId);
+      }
+      case 'RETRY_DEFINITION_REQUEST': {
+        if (!lease) throw stale();
+        await sourceNavigation.recoveryIntent({ tabId, ownerTabId: sender.tab.id, collectionId: lease.collectionId,
+          workspaceId: workspace?.workspaceId, bookKey: workspace?.bookKey || lease.bookKey }, message.transitionId);
+        // No provider's request/correlation protocol is verified yet. Never replay an unknown request.
+        return { ok: true, retried: false, reason: 'protocol_unverified' };
+      }
+      case 'PREPARE_SOURCE_REPLACEMENT': {
+        if (!lease) throw stale();
+        return sourceTabRecovery.prepare({ tabId, ownerTabId: sender.tab.id, collectionId: lease.collectionId,
+          workspaceId: workspace?.workspaceId, bookKey: workspace?.bookKey || lease.bookKey }, sender, message.transitionId);
       }
       case 'GET_STATE': {
         const projection = message.summary ? await exportCommands.readSummary(storageId) : null;
@@ -747,13 +820,18 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
           if (dropped) reason = next.warnings?.at(-1) || 'Достигнут лимит локального хранения.';
           // The collector checks earlier capture losses from this reply instead
           // of requesting a recomputed summary after every page.
-          retained = { dropped: next.dropped || 0, ...(next.warnings?.length ? { warning: next.warnings.at(-1) } : {}) };
+          retained = { dropped: next.dropped || 0,
+            ...(typeof response.snapshot.capturedAt === 'string' && Number.isFinite(Date.parse(response.snapshot.capturedAt)) ? { capturedAt: response.snapshot.capturedAt } : {}),
+            ...(next.warnings?.length ? { warning: next.warnings.at(-1) } : {}) };
           if (response.snapshot.route?.kind === 'lesson') {
             retained.authorData = hasExerciseCapture(next.captures, response.snapshot.url);
           }
           return next;
         });
-        if (!dropped && message.expectedDocumentToken) await sourceNavigation.complete(tabId, response.snapshot.url);
+        if (!dropped && message.expectedDocumentToken) {
+          await sourceNavigation.complete(tabId, response.snapshot.url);
+          if (retained.authorData || response.snapshot.route?.kind === 'book') await sourceTabRecovery.finish(tabId, lease?.collectionId, sender);
+        }
         await notify(tabId);
         if (dropped) throw new Error(`Снимок не сохранён: ${reason}`);
         return { ok: true, snapshotUrl: message.expectedUrl ? navigationUrl(response.snapshot.url) : response.snapshot.url,
@@ -790,7 +868,7 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
         if (workspace && response?.ok && response.navigation?.kind === 'book' && sourceBookKey(response.navigation.url) === workspace.bookKey) {
           await catalogue.update(workspace.workspaceId, { book: { title: response.navigation.title || workspace.book?.title, rootUrl: response.navigation.url } });
         }
-        if (response?.ok && response.navigation) sourceNavigation.remember(tabId, response.navigation);
+        if (response?.ok && response.navigation) await sourceNavigation.remember(tabId, response.navigation);
         return response;
       }
       case 'PREPARE_BOOK': {
@@ -800,7 +878,7 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
         const response = await sendSource(tabId, { type: 'PREPARE_BOOK', expectedUrl: navigationUrl(current.url),
           expectedDocumentToken: requireDocumentToken(message.expectedDocumentToken),
           ...(message.sourceTimeoutMs !== undefined ? { sourceTimeoutMs: message.sourceTimeoutMs } : {}) }, expectedEpoch);
-        if (response?.ok && response.navigation) sourceNavigation.remember(tabId, response.navigation);
+        if (response?.ok && response.navigation) await sourceNavigation.remember(tabId, response.navigation);
         return response;
       }
       case 'OPEN_MATERIAL_ITEM': {
@@ -810,6 +888,19 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
         return await sourceNavigation.navigate({ tabId, ownerTabId: sender.tab?.id, collectionId: lease.collectionId,
           workspaceId: workspace?.workspaceId, bookKey: workspace?.bookKey || sourceBookKey(current.url) },
         { type: 'OPEN_MATERIAL_ITEM', key: message.key, expectedUrl: navigationUrl(current.url),
+          expectedDocumentToken: requireDocumentToken(message.expectedDocumentToken), expectedVisitToken: message.expectedVisitToken });
+      }
+      case 'OPEN_CONFIRMED_LESSON': {
+        const current = await source(tabId);
+        if (!await enabled(tabId) || !sameMaterialPage(message.expectedUrl, current.url)) {
+          throw Object.assign(new Error('Исходная вкладка изменилась. Переход к уроку остановлен.'), { code: 'source_changed' });
+        }
+        if (typeof message.key !== 'string' || message.key.length > 1000 || message.url !== undefined) {
+          throw Object.assign(new Error('Не подтверждён выбранный урок.'), { code: 'source_lesson_unconfirmed' });
+        }
+        return await sourceNavigation.navigate({ tabId, ownerTabId: sender.tab?.id, collectionId: lease.collectionId,
+          workspaceId: workspace?.workspaceId, bookKey: workspace?.bookKey || sourceBookKey(current.url) },
+        { type: 'OPEN_CONFIRMED_LESSON', key: message.key, expectedUrl: navigationUrl(current.url),
           expectedDocumentToken: requireDocumentToken(message.expectedDocumentToken), expectedVisitToken: message.expectedVisitToken });
       }
       case 'NAVIGATE_SOURCE': {
@@ -891,9 +982,22 @@ export function installBackground(chrome, { readWorkspace: readStored = readPers
       }
       return task;
     };
-    const operation = sourceOriginsReady.then(() => message.workspaceId && !Number.isInteger(message.tabId)
+    const operation = sourceOriginsReady.then(async () => {
+      if (['COMMIT_SOURCE_REPLACEMENT', 'ABORT_SOURCE_REPLACEMENT'].includes(message.type)) {
+        if (!isDashboard(sender)) throw stale();
+        return sourceTabRecovery[message.type === 'COMMIT_SOURCE_REPLACEMENT' ? 'commit' : 'abort'](message, sender);
+      }
+      if (message.type === 'CANCEL_COLLECTION' && isDashboard(sender)) {
+        const recovery = await sourceTabRecovery.read(sender.tab.id);
+        if (recovery && recovery.phase !== 'aborted' && recovery.collectionId === message.collectionId) {
+          const result = await sourceTabRecovery.abort(message, sender);
+          if (!result.replacementSaved) return { ...result, cancelled: true };
+        }
+      }
+      return message.workspaceId && !Number.isInteger(message.tabId)
       ? catalogue.get(message.workspaceId).then(workspace => dispatch({ ...message, tabId: workspace?.sourceTabId }))
-      : dispatch(message));
+      : dispatch(message);
+    });
     operation.then(respond, error => respond({ ok: false, error: error.message || 'Не удалось выполнить действие.',
       ...(error.code ? { code: error.code } : {}),
       ...(exporterBindingDiagnostic(error.binding) ? { binding: exporterBindingDiagnostic(error.binding) } : {}),

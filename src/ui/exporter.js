@@ -10,7 +10,6 @@ import { collectBook } from "../lib/collection.js";
 import { createProblemReporter, downloadProblemReport } from "./problem-report.js";
 import { exportReadiness, assertExportReady } from "../lib/export-readiness.js";
 import { exportFileProblems } from "../lib/export-file-problems.js";
-import { confirmPartialExport } from "./partial-export-consent.js";
 import { getView } from "./view.js";
 import { isSourceUrl } from "../lib/state.js";
 import { archiveFilename } from "../lib/download-name.js";
@@ -19,6 +18,7 @@ import { sourceConnectionView, collectionLoadingDetail, collectionFailureNotice,
 import { navigationErrorCode } from "../lib/source-navigation-errors.js";
 import { navigationDiagnostic } from "../lib/navigation-diagnostics.js";
 import { exporterBindingDiagnostic } from "../lib/exporter-binding-diagnostics.js";
+import { createSourceReplacement } from "./source-replacement.js";
 
 const elements = Object.fromEntries([...document.querySelectorAll("[id]")].map(element => [element.id, element]));
 const queryTab = new URL(location.href).searchParams.get("tab");
@@ -41,6 +41,7 @@ let refreshTimer;
 let refreshing = null;
 let permissionDenied = false;
 let mediaPermissionGranted = false;
+let mediaPermissionRequested = false;
 let lastDownload = null;
 let downloadProgress = null;
 let selectionGeneration = 0;
@@ -50,6 +51,7 @@ let sourceClosed = false;
 let sourceStatus = null;
 let collectionLoading = "";
 let latestAttemptDiagnostics = null;
+let sourceReplacement = null;
 const problemReporter = createProblemReporter({ send: sendTo,
   extensionVersion: globalThis.chrome?.runtime?.getManifest?.()?.version,
   browserVersion: globalThis.navigator?.userAgent || "unknown",
@@ -72,7 +74,15 @@ function showMessage(message, error = false) {
 async function send(type, payload = {}) {
   return sendTo(tabId, type, payload);
 }
+function adoptRecoverySource(sourceTabId) {
+  if (!Number.isSafeInteger(sourceTabId) || sourceTabId <= 0) return;
+  tabId = sourceTabId; sourceClosed = false; sourceDisconnected = false; sourceStatus = null;
+  const url = new URL(location.href); url.searchParams.set("tab", String(sourceTabId));
+  history.replaceState(null, "", url.href);
+  selectProblemReport();
+}
 async function sendTo(selectedTabId, type, payload = {}) {
+  const generation = selectionGeneration;
   if (selectedTabId === null && !workspaceId && type !== "RESOLVE_WORKSPACE") throw new Error("Откройте содержание книги и нажмите значок exporter.");
   let response;
   try { response = await chrome.runtime.sendMessage({ workspaceId, ...payload, type, tabId: selectedTabId }); }
@@ -82,6 +92,10 @@ async function sendTo(selectedTabId, type, payload = {}) {
   if (!response?.ok) {
     const error = new Error(response?.error || "Не удалось подключиться. Обновите расширение и вкладку с книгой.");
     error.code = response?.code;
+    if (error.code === "navigation_blocked" && typeof response.blockedReasonCode === "string") {
+      error.blockedReasonCode = response.blockedReasonCode;
+      error.lessonButton = response.lessonButton;
+    }
     const networkError = navigationErrorCode(response?.networkError);
     if (networkError) error.networkError = networkError;
     const navigation = navigationDiagnostic(response?.navigation);
@@ -95,6 +109,8 @@ async function sendTo(selectedTabId, type, payload = {}) {
     if (Number.isInteger(response?.attempt) && response.attempt >= 1 && response.attempt <= 3) error.attempt = response.attempt;
     throw error;
   }
+  if (generation === selectionGeneration && selectedTabId === tabId && (!payload.collectionId || payload.collectionId === state.collectionId) &&
+    Number.isSafeInteger(response.restoreSourceTabId)) adoptRecoverySource(response.restoreSourceTabId);
   return response;
 }
 
@@ -210,8 +226,11 @@ function collectionNotice(view) {
 
 function render() {
   const busy = isBusy();
-  const view = getView({ state, sourceAvailable, source, collecting: Boolean(collectionController), downloading: Boolean(abortController), busy });
-  if (sourceDisconnected || sourceStatus && sourceStatus.state !== "same_book" || state.collectionLocked || workspaceId && bookKey(source?.url) !== workspaceBookKey) view.canCollect = false;
+  const view = getView({ state, sourceAvailable, source, sourceNavigation, collecting: Boolean(collectionController), downloading: Boolean(abortController), busy });
+  if (sourceDisconnected || sourceStatus && sourceStatus.state !== "same_book" || state.collectionLocked || workspaceId && bookKey(source?.url) !== workspaceBookKey) {
+    view.canCollect = false;
+    view.canResume = false;
+  }
   const downloaded = Boolean(lastDownload && !busy);
   const mode = downloaded ? "downloaded" : view.mode;
   const bookTitle = selectedBook()?.title || "";
@@ -236,12 +255,14 @@ function render() {
     ? `Архив сохранён без ${lastDownload.missing} файлов. После импорта проверьте книгу. Скачайте отчёт о проблеме и пришлите нам — поможем разобраться.`
     : `Архив сохранён в выбранный файл.${lastDownload.originalImages ? ` Изображений сохранено без сжатия: ${lastDownload.originalImages}.` : ""}` : collectionController ? "Оставьте обе вкладки открытыми и не переключайте страницы книги." : initial ? "" : view.description;
 
-  elements["collect-book"].hidden = busy || downloaded || view.canExport || sourceDisconnected || permissionDenied || (view.hasData && !view.canCollect) || (!view.hasData && initialized && !view.canCollect);
+  elements["collect-book"].hidden = busy || downloaded || view.canExport || sourceDisconnected || (view.hasData && !view.canCollect) || (!view.hasData && initialized && !view.canCollect);
   elements["collect-book"].disabled = !view.canCollect;
   elements["collect-book"].classList.toggle("button-primary", true);
   elements["collect-book"].classList.toggle("button-secondary", false);
   elements["collect-book"].style.order = view.hasData ? "2" : "0";
   elements["collect-label"].textContent = view.collectLabel;
+  elements["restart-collection"].hidden = !view.hasData || !view.canCollect || !bookContents(source?.url) || busy || sourceDisconnected || (!view.canResume && !view.canExport && !downloaded);
+  elements["restart-collection"].disabled = !view.canCollect || !bookContents(source?.url);
   elements.export.hidden = busy || !view.canExport;
   elements.export.classList.toggle("button-primary", true);
   elements.export.classList.toggle("button-secondary", false);
@@ -258,6 +279,10 @@ function render() {
     countLabel(state.snapshots.length, "страница", "страницы", "страниц"),
     countLabel(lastDownload?.loaded ?? assets.length, "файл", "файла", "файлов"),
   ].filter(Boolean).join(" · ");
+  elements["saved-collection"].hidden = busy || !view.confirmedSections || state.collection?.status === "finished";
+  elements["saved-collection"].textContent = view.confirmedSections
+    ? `Подтверждено разделов: ${view.confirmedSections}.${view.startedAt ? ` Сбор начат ${new Date(view.startedAt).toLocaleString("ru")}.` : ""} Ранее собранные разделы сохранятся с исходными датами. Для обновления всей книги выберите «Собрать заново».`
+    : "";
   const notice = savedBookDiffers() && view.hasData
     ? `Сохранены материалы книги «${storedBook().title}». Сейчас открыта «${bookTitle}». Архив содержит сохранённую книгу; новый сбор заменит её копию.`
     : collectionNotice(view);
@@ -266,7 +291,7 @@ function render() {
   elements["download-diagnostics"].hidden = busy || !problemReporter.available();
   elements["action-hint"].textContent = busy
     ? collectionController ? "Можно остановить сбор: уже собранные материалы сохранятся." : "Оставьте эту вкладку открытой до сохранения архива."
-    : permissionDenied ? "Разрешите доступ к файлам и повторите скачивание. Архив без файлов недоступен."
+    : permissionDenied ? "Архив сохранится с доступными файлами. Недоступные файлы будут указаны в отчёте."
     : downloaded ? "Для следующей книги откройте её на платформе и снова нажмите значок exporter."
     : view.hasData ? !view.canExport ? exportReadiness(state).reason : assets.length ? "Изображения, аудио и видео добавим автоматически. Chrome может запросить разрешение." : "Архив ZIP сохранится на ваш компьютер."
     : view.canCollect ? "Уроки, разделы и домашние задания соберём по порядку." : tabId === null && !workspaceId ? "Для каждой книги откроется отдельная страница exporter." : "Вернитесь сюда после открытия содержания книги.";
@@ -301,6 +326,7 @@ function render() {
 }
 
 async function refresh() {
+  if (sourceReplacement?.active()) return;
   // Source navigation can trigger several notifications at once.
   if (tabId === null && !workspaceId) return;
   const selectedTabId = tabId, generation = selectionGeneration, sourceVersion = sourceRevision, selectedWorkspaceId = workspaceId;
@@ -348,6 +374,7 @@ async function refresh() {
     sourceDisconnected = nextDisconnected;
     sourceClosed = nextClosed;
     sourceStatus = nextStatus;
+    const previousNavigation = sourceNavigation;
     sourceNavigation = nextNavigation;
     if (nextNavigation?.kind === "book" && pageKey(nextNavigation.url) === pageKey(nextSource?.url)) {
       const verified = bookPair(nextNavigation.title, nextNavigation.url);
@@ -361,11 +388,22 @@ async function refresh() {
       if (generation !== selectionGeneration || selectedTabId !== tabId) return;
     }
     if (!busy) {
-      selectProblemReport();
+      const blocked = nextNavigation?.blocked === true &&
+        (!workspaceBookKey || bookKey(nextNavigation.url) === workspaceBookKey);
+      selectProblemReport(blocked ? selectedBook() || undefined : undefined);
       await problemReporter.load();
       if (generation !== selectionGeneration || selectedTabId !== tabId) return;
       if (connectionFailure?.code === "source_loading") problemReporter.record({ ...connectionFailureEvent(connectionFailure), status: "waiting" });
       else if (connectionFailure && connectionFailure.code !== "source_closed") problemReporter.record(connectionFailureEvent(connectionFailure));
+      else if (blocked) {
+        if (!previousNavigation?.blocked || previousNavigation.url !== nextNavigation.url ||
+            previousNavigation.blockedReasonCode !== nextNavigation.blockedReasonCode ||
+            JSON.stringify(previousNavigation.lessonButton) !== JSON.stringify(nextNavigation.lessonButton)) {
+          problemReporter.record({ stage: nextNavigation.kind === "lesson" ? "open_section" : "book",
+            status: "failed", reason: "navigation_blocked", blockedReasonCode: nextNavigation.blockedReasonCode,
+            lessonButton: nextNavigation.lessonButton, url: nextNavigation.url });
+        }
+      }
       else if (!connectionFailure && !initialized) {
         problemReporter.connectionRecovered();
         if (!problemReporter.available()) problemReporter.record({ stage: "connection", status: "ready" });
@@ -389,7 +427,7 @@ function changeSelection(selectedTabId, selectedWorkspace = null, book = null, p
   workspaceId = selectedWorkspace; workspaceBook = book;
   workspaceBookKey = pinnedBookKey || bookKey(book?.rootUrl);
   problemReporter.clear();
-  mediaPermissionGranted = false;
+  mediaPermissionGranted = false; mediaPermissionRequested = false;
   selectionGeneration++;
   clearTimeout(refreshTimer);
   tabId = selectedTabId;
@@ -451,9 +489,13 @@ elements["download-diagnostics"].addEventListener("click", async () => {
   try { downloadProblemReport(await problemReporter.snapshot()); }
   catch { showMessage("Не удалось скачать отчёт о проблеме.", true); }
 });
-async function startCollection() {
-  if (isBusy() || !sourceAvailable || sourceClosed || sourceDisconnected || !bookContents(source?.url) || state.collectionLocked || workspaceId && bookKey(source?.url) !== workspaceBookKey) return;
-  if ((state.snapshots.length || state.captures.length) && !confirm("Собрать книгу заново? Текущая копия в расширении будет заменена. Завершённый сбор можно сначала скачать. Исходная книга не изменится.")) return;
+async function startCollection(requestedMode) {
+  if (isBusy() || !sourceAvailable || sourceClosed || sourceDisconnected || sourceStatus && sourceStatus.state !== "same_book" || state.collectionLocked || workspaceId && bookKey(source?.url) !== workspaceBookKey) return;
+  const view = getView({ state, sourceAvailable, source, sourceNavigation });
+  const mode = requestedMode === "new" || !view.canResume ? "new" : "resume";
+  if (!view.canCollect || mode === "new" && !bookContents(source?.url)) return;
+  if (mode === "new" && (state.snapshots.length || state.captures.length) && !confirm("Собрать книгу заново? Текущая копия в расширении будет заменена. Завершённый сбор можно сначала скачать. Исходная книга не изменится.")) return;
+  const resumeState = mode === "resume" ? { collection: structuredClone(state.collection), snapshots: state.snapshots, dropped: state.dropped } : null;
   busy = true;
   latestAttemptDiagnostics = null;
   const controller = new AbortController();
@@ -461,7 +503,7 @@ async function startCollection() {
   const requestId = crypto.randomUUID();
   collectionRequestId = requestId;
   delete state.collectionId;
-  const selectedTabId = tabId, generation = selectionGeneration, selectedWorkspaceId = workspaceId;
+  const generation = selectionGeneration, selectedWorkspaceId = workspaceId;
   const diagnosticBook = selectedBook();
   let diagnosticAttempt;
   const diagnosticEvents = [];
@@ -472,13 +514,17 @@ async function startCollection() {
     if (diagnosticAttempt) diagnosticAttempt.record(event);
     else diagnosticEvents.push(event);
   };
-  const isCurrent = () => generation === selectionGeneration && selectedTabId === tabId && collectionController === controller;
+  const isCurrent = () => generation === selectionGeneration && selectedWorkspaceId === workspaceId && collectionController === controller;
+  sourceReplacement = createSourceReplacement({ send: (type, payload) => sendTo(tabId, type, { ...payload, workspaceId: selectedWorkspaceId }),
+    getSourceTabId: () => tabId, adopt: id => { if (isCurrent()) adoptRecoverySource(id); }, signal: controller.signal });
   const request = async (type, payload) => {
     // A cancelled collector must still be able to release its own lease.
     // The worker rejects these scoped commands once that lease was revoked.
     const cleanup = ["STOP_CAPTURE", "END_COLLECTION"].includes(type) && typeof payload?.collectionId === "string" && payload.collectionId;
     if (!isCurrent() && !cleanup) throw new DOMException("Сбор отменён.", "AbortError");
-    const result = await sendTo(selectedTabId, type, { ...payload, ...(["BEGIN_COLLECTION", "GET_NAVIGATION"].includes(type) ? { requestId } : {}), workspaceId: selectedWorkspaceId });
+    if (type === "REPLACE_SOURCE_TAB") await diagnosticAttempt?.flush();
+    const result = type === "REPLACE_SOURCE_TAB" ? await sourceReplacement.replace(payload)
+      : await sendTo(tabId, type, { ...payload, ...(["BEGIN_COLLECTION", "GET_NAVIGATION"].includes(type) ? { requestId } : {}), workspaceId: selectedWorkspaceId });
     if (type === "BEGIN_COLLECTION" && isCurrent()) {
       state.collectionId = result.collectionId;
       selectProblemReport(diagnosticBook);
@@ -493,7 +539,7 @@ async function startCollection() {
     try {
       let checkpointed = false;
       const extensionVersion = chrome.runtime.getManifest?.()?.version;
-      const report = await collectBook({ reset: true, request, signal: controller.signal, extensionVersion, onDiagnostic, onProgress: report => {
+      const report = await collectBook({ mode, resumeState, reset: mode === "new", request, signal: controller.signal, extensionVersion, onDiagnostic, onProgress: report => {
         checkpointed = true;
         if (isCurrent()) { state.collection = report; selectProblemReport(diagnosticBook); render(); }
       } });
@@ -521,12 +567,13 @@ async function startCollection() {
       }
     }
     finally {
-      if (isCurrent()) { collectionController = null; busy = false; render(); scheduleRefresh(); }
+      if (isCurrent()) { sourceReplacement = null; collectionController = null; busy = false; render(); scheduleRefresh(); }
     }
   })();
   await task;
 }
 elements["collect-book"].addEventListener("click", startCollection);
+elements["restart-collection"].addEventListener("click", () => startCollection("new"));
 let lastProgressPaint = 0;
 function setDownloadProgress(progress) {
   const previous = downloadProgress;
@@ -555,13 +602,13 @@ async function downloadAssets(candidates, signal, maxTotalBytes, onDiagnostic, s
     onWait: () => setDownloadProgress({ title: "Подготовка файлов", detail: "Ожидает подготовки файлов. Если другая книга обрабатывается, эта начнётся следом." }),
     onCodecFailure: reason => onDiagnostic?.({ stage: 'files', status: 'failed', reason: reason === 'timeout' ? 'webp_timeout' : 'webp_unavailable' }),
     hasPermission: origin => chrome.permissions.contains({ origins: [origin] }),
-    onProgress: ({ completed, total, loadedBytes, active, encoding, originalImages = 0 }) => {
+    onProgress: ({ completed, total, loadedBytes, active, encoding, originalImages = 0, cacheHits = 0, cacheReused = 0, missingFiles = 0 }) => {
       if (signal.aborted) return;
       const fraction = active.reduce((sum, item) => sum + (item.total ? Math.min(item.loaded / item.total, 1) : 0), 0);
       setDownloadProgress({
         title: encoding && !active.length ? "Подготовка изображений" : "Файлы книги", count: total > 0 ? `${completed} из ${total}` : "",
         value: completed + fraction, max: total,
-        detail: `${bytes(loadedBytes)} загружено${active.length ? ` · одновременно ${active.length} ${active.length === 1 ? "файл" : "файла"}` : ""}${originalImages ? ` · без сжатия: ${originalImages}` : ""}`,
+        detail: `${bytes(loadedBytes)} загружено${active.length ? ` · одновременно ${active.length} ${active.length === 1 ? "файл" : "файла"}` : ""}${missingFiles ? ` · недоступно: ${missingFiles}` : ""}${originalImages ? ` · без сжатия: ${originalImages}` : ""}${cacheHits + cacheReused ? ` · повторно использовано: ${cacheHits + cacheReused}` : ""}`,
       });
     },
   });
@@ -590,7 +637,6 @@ async function exportArchive({ selection, permission } = {}) {
   if (permission) void Promise.resolve(permission).catch(() => {});
   const diagnosticStartedAt = Date.now();
   let diagnosticStage = "permissions";
-  let askedForConsent = false;
   let spool;
   let resources, resourceFailure;
   const diagnose = (stage, status, details = {}) => {
@@ -609,11 +655,11 @@ async function exportArchive({ selection, permission } = {}) {
     if (permission) {
       const allowed = await abortablePermission(permission, controller.signal);
       assertCurrent();
-      mediaPermissionGranted = allowed;
+      mediaPermissionGranted = allowed; mediaPermissionRequested = true;
       permissionDenied = !allowed;
       diagnose("permissions", allowed ? "ready" : "failed", allowed ? {} : { reason: "permission_denied" });
       showMessage(allowed ? "Доступ к файлам разрешён. Нажмите «Скачать архив» и выберите место сохранения."
-        : "Chrome не разрешил доступ к файлам книги. Нажмите «Скачать архив» и разрешите доступ.", !allowed);
+        : "Chrome не разрешил доступ к файлам книги. Нажмите «Скачать архив», чтобы сохранить доступные материалы с предупреждениями.", !allowed);
       return;
     }
     let destination;
@@ -653,22 +699,6 @@ async function exportArchive({ selection, permission } = {}) {
     assertCurrent();
     renderMissingFiles(files);
     const problems = exportFileProblems(files, exportAssets);
-    if (problems.length) {
-      diagnose("files", "waiting");
-      askedForConsent = true;
-      const accepted = await confirmPartialExport({ elements, signal: controller.signal,
-        onReport: async () => {
-          await diagnosticAttempt.flush();
-          assertCurrent();
-          const report = await problemReporter.snapshot();
-          assertCurrent();
-          if (!report) throw new Error("Отчёт недоступен.");
-          downloadProblemReport(report);
-        },
-      });
-      assertCurrent();
-      if (!accepted) throw new DOMException("Скачивание отменено.", "AbortError");
-    }
     diagnose("files", "finished");
     diagnosticStage = "zip";
     diagnose("zip", "started");
@@ -706,7 +736,6 @@ async function exportArchive({ selection, permission } = {}) {
     await diagnosticAttempt.flush();
     if (isCurrent()) {
       busy = false; abortController = null; downloadProgress = null; render();
-      if (askedForConsent && !elements.export.hidden && !elements.export.disabled) elements.export.focus?.();
     }
   }
 }
@@ -728,7 +757,7 @@ elements.export.addEventListener("click", () => {
     assertExportReady(state);
     assertAssetCapacity(assets);
     const origins = mediaOrigins(assets);
-    if (origins.length && !mediaPermissionGranted) {
+    if (origins.length && !mediaPermissionGranted && !mediaPermissionRequested) {
       void exportArchive({ permission: chrome.permissions.request({ origins }) });
       return;
     }

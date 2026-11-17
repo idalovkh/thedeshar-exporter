@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import { navigationBlockMessage, navigationBlockReason } from '../src/lib/navigation-block-reasons.js';
 
 const source = await readFile(new URL('../src/capture/navigation.js', import.meta.url), 'utf8');
 const bookUrl = 'https://progressme.ru/cabinet/school/materials/book/867169/content';
@@ -250,6 +251,78 @@ test('mobile lesson controls use the recognized arrow button and the card name w
   const unrelated = mobileCard('Lesson', { icon: 'iconedv-Delete' });
   assert.equal(environment(bookUrl, [unrelated.node]).api.inspect().ready, false);
   assert.equal(unrelated.open.clicks, 0);
+});
+
+test('a changed desktop label or mobile icon can use a confirmed lesson identity', () => {
+  const desktop = card('Desktop lesson', { text: 'Open lesson', attributes: { 'data-lesson-id': '101' } });
+  desktop.node.innerText = 'Desktop lesson\nOpen lesson';
+  const mobile = mobileCard('Mobile lesson', { icon: 'updated-arrow' });
+  const link = element('a', { attributes: { href: '/lesson-editor/book/867169/lesson/202/section' } });
+  link.parentElement = mobile.node;
+  mobile.node.children.push(link);
+  const { api } = environment(bookUrl, [desktop.node, mobile.node]);
+  const state = api.inspect();
+  assert.equal(state.ready, true);
+  assert.deepEqual(Array.from(state.items, item => [item.title, item.sourceId]), [
+    ['Desktop lesson', '101'], ['Mobile lesson', '202'],
+  ]);
+  for (const item of state.items) assert.equal(api.open({ expectedUrl: state.url, key: item.key }).ok, true);
+  assert.equal(desktop.open.clicks + mobile.open.clicks, 2);
+  assert.equal(desktop.edit.clicks + mobile.edit.clicks, 0);
+});
+
+test('fallback buttons still refuse conflicting identities, secondary actions and replaced controls', () => {
+  const conflicting = card('Conflicting IDs', { text: 'Open lesson', attributes: { 'data-lesson-id': '101' } });
+  conflicting.node.attributes['data-lesson-id'] = '202';
+  const edited = card('Edit action', { text: 'Редактировать', attributes: { 'data-lesson-id': '101' } });
+  const deleted = mobileCard('Delete action', { icon: 'iconedv-Delete' });
+  deleted.node.attributes['data-lesson-id'] = '101';
+  const foreign = card('Different book', { text: 'Open lesson', attributes: {
+    href: '/lesson-editor/book/987654/lesson/101/section',
+  } });
+  const conflictingLink = card('Conflicting link', { attributes: { 'data-lesson-id': '101' } });
+  const link = element('a', { attributes: { href: '/lesson-editor/book/867169/lesson/202/section' } });
+  link.parentElement = conflictingLink.node;
+  conflictingLink.node.children.push(link);
+  for (const [item, cause] of [[conflicting, 'identity'], [edited, 'label'], [deleted, 'icon'], [foreign, 'label'], [conflictingLink, 'identity']]) {
+    const { api } = environment(bookUrl, [item.node]);
+    const state = api.inspect();
+    assert.equal(state.blocked, true);
+    assert.equal(state.lessonButton.cause, cause);
+    assert.equal(api.open({ expectedUrl: bookUrl, key: 'lesson' }).ok, false);
+    assert.equal(item.open.clicks, 0);
+  }
+
+  const item = card('Lesson', { text: 'Open lesson', attributes: { 'data-lesson-id': '101' } });
+  item.node.innerText = 'Lesson\nOpen lesson';
+  const { api } = environment(bookUrl, [item.node]);
+  const state = api.inspect();
+  const replacement = card('Lesson', { text: 'Open lesson', attributes: { 'data-lesson-id': '101' } }).open;
+  replacement.parentElement = item.node;
+  item.node.children[0] = replacement;
+  assert.equal(api.open({ expectedUrl: bookUrl, key: state.items[0].key }).code, 'navigation_stale');
+  assert.equal(item.open.clicks + replacement.clicks, 0);
+});
+
+test('button diagnostics count visible choices owned by the first broken card', () => {
+  const ready = card('Ready');
+  const outer = element('li', { classes: 'unit_li', children: [card('Nested').node] });
+  const multiple = card('Multiple');
+  const another = mobileCard('Multiple').open;
+  another.parentElement = multiple.node;
+  multiple.node.children.push(another);
+  const hidden = card('Hidden', { hidden: true });
+  const disabled = card('Disabled', { disabled: true });
+  for (const [broken, cause, desktopVisible, mobileVisible] of [
+    [outer, 'missing', 0, 0], [multiple.node, 'multiple', 1, 1], [hidden.node, 'missing', 0, 0],
+    [disabled.node, 'disabled', 1, 0],
+  ]) {
+    const { api } = environment(bookUrl, [ready.node, broken, card('Another missing', { hidden: true }).node]);
+    const expected = { cardIndex: 2, desktopVisible, mobileVisible, cause };
+    assert.deepEqual({ ...api.inspect().lessonButton }, expected);
+    assert.deepEqual({ ...api.prepare({ expectedUrl: bookUrl }).lessonButton }, expected);
+    assert.deepEqual({ ...api.open({ expectedUrl: bookUrl, key: 'lesson' }).lessonButton }, expected);
+  }
 });
 
 test('unique title keys survive card ordering and reloads', () => {
@@ -557,10 +630,43 @@ test('active search filters, pagination, infinite scroll and load more stop trav
     assert.equal(state.ready, false);
     assert.equal(state.blocked, true);
     assert.equal(api.open({ expectedUrl: state.url, key: state.items[0].key }).ok, false);
+    const prepared = api.prepare({ expectedUrl: state.url });
+    assert.equal(prepared.ok, false);
+    assert.equal(prepared.code, 'navigation_blocked');
+    assert.equal(prepared.blockedReasonCode, state.blockedReasonCode);
     assert.equal(item.open.clicks, 0);
   }
   const { api } = environment(bookUrl, [card('Lesson').node, element('input', { attributes: { type: 'search' }, value: '' })]);
   assert.equal(api.inspect().ready, true);
+});
+
+test('blocked navigation reports the specific check that stopped collection', () => {
+  const search = element('input', { attributes: { type: 'search' }, value: 'One lesson' });
+  const pagination = element('div', { classes: 'pagination' });
+  const invalidItem = card('Disabled lesson', { disabled: true }).node;
+  const invalidButton = mobileCard('Lesson', { icon: 'wrong_icon' }).node;
+  const sameLesson = () => card('Lesson', { attributes: { 'data-lesson-id': '10' } }).node;
+  const cases = [
+    ['unsupported_page', 'https://progressme.ru/cabinet/school/materials', []],
+    ['invalid_item', bookUrl, [invalidItem]],
+    ['item_limit', bookUrl, Array.from({ length: 1001 }, (_, index) => card(`Lesson ${index}`).node)],
+    ['lesson_button', bookUrl, [invalidButton]],
+    ['search_active', bookUrl, [card('Lesson').node, search]],
+    ['pagination', bookUrl, [card('Lesson').node, search, pagination]],
+    ['duplicate_item', bookUrl, [sameLesson(), sameLesson()]],
+  ];
+  for (const [reason, url, nodes] of cases) {
+    const state = environment(url, nodes).api.inspect();
+    assert.equal(state.blocked, true, reason);
+    assert.equal(state.blockedReasonCode, reason);
+    assert.equal(navigationBlockReason(state.blockedReasonCode), reason);
+    assert.equal(navigationBlockMessage(reason), state.warnings.at(-1));
+  }
+  const unblocked = environment(bookUrl, [card('Lesson').node]).api.inspect();
+  assert.equal(unblocked.blocked, false);
+  assert.equal(Object.hasOwn(unblocked, 'blockedReasonCode'), false);
+  assert.equal(navigationBlockReason('constructor'), '');
+  assert.equal(navigationBlockMessage('unknown_reason'), '');
 });
 
 test('an explicit empty lesson or homework can be ready but a bare layout cannot', () => {

@@ -46,10 +46,10 @@ test('the worker converts in-bounds PNG and only scales images outside Full HD',
   assert.deepEqual(await encode(image(10427, 5668, StreamOnlyBlob)), { blob: result, resized: true });
   assert.deepEqual(dimensions, [[1920, 1080], [1080, 1920], [1920, 1044]]);
   await assert.rejects(encode(image(16000, 16000)), { reason: 'image_dimensions_limit' });
-  await assert.rejects(encode(new Blob(['bad image'], { type: 'image/png' })), { reason: 'image_dimensions_unverified' });
+  await assert.rejects(encode(new Blob(['bad image'], { type: 'image/png' })), { reason: 'image_dimensions_invalid' });
   const invalid = new Uint8Array(await image(1, 1).arrayBuffer());
   invalid[29] ^= 1; // IHDR CRC
-  await assert.rejects(encode(new Blob([invalid])), { reason: 'image_dimensions_unverified' });
+  await assert.rejects(encode(new Blob([invalid])), { reason: 'image_dimensions_invalid' });
 });
 
 test('image conversion cache distinguishes bytes beyond its first block', async () => {
@@ -179,14 +179,15 @@ test('a failed in-bounds conversion is a named missing file and blocks the archi
   }
 });
 
-test('an unavailable profile lock cannot bypass raster validation', async () => {
+test('an unavailable profile lock preserves an admissible original image', async () => {
   const source = image(2000, 1000);
   const asset = { id: 'photo', name: 'page.png', url: 'https://cdn.example.org/page.png' };
   const [file] = await downloadExportMedia([asset], {
     fetchFile: async () => new Response(source, { headers: { 'content-type': source.type } }),
   }, null);
-  assert.equal(file.status, 'failed');
-  assert.throws(() => assertExportFilesReady([file], [asset]), { code: 'incomplete_export' });
+  assert.equal(file.status, 'downloaded');
+  assert.equal(file.originalImage, true);
+  assert.deepEqual(Buffer.from(await file.data.arrayBuffer()), Buffer.from(await source.arrayBuffer()));
 });
 
 test('the worker client accepts a resized WebP larger than the original', async () => {

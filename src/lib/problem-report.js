@@ -10,7 +10,7 @@ import { exporterBindingDiagnostic } from './exporter-binding-diagnostics.js';
 export const MAX_PROBLEM_REPORT_BYTES = 1024 * 1024;
 const encoder = new TextEncoder();
 const COLLECTION_STAGES = new Set(['book', 'open_lesson', 'open_section', 'wait_exercises', 'save_page',
-  'wait_author_data', 'reload_section', 'finish']);
+  'wait_author_data', 'reload_section', 'retry_definition', 'replace_source', 'finish']);
 const DOWNLOAD_STAGES = new Set(['permissions', 'files', 'hydrate', 'package', 'zip', 'export']);
 const STAGES = new Set(['connection', ...COLLECTION_STAGES, ...DOWNLOAD_STAGES]);
 const STATUSES = new Set(['started', 'waiting', 'ready', 'saved', 'retrying', 'finished', 'failed', 'cancelled',
@@ -23,10 +23,11 @@ const REASONS = new Set(['section_loading_timeout', 'section_render_timeout', 'n
   'zip_write', 'zip_verification', 'file_save_unavailable', 'unsupported_content_type', 'http_error', 'network_error',
   'temporary_url', 'timeout', 'partial_response', 'unsupported_stream', 'file_limit', 'size_mismatch', 'empty_file',
   'download_failed', 'ambiguous_media_url', 'invalid_png', 'webp_timeout', 'webp_unavailable',
-  'image_dimensions_unverified', 'image_dimensions_limit', 'image_resize_failed', 'image_resize_timeout',
+  'image_dimensions_invalid', 'image_dimensions_unverified', 'image_dimensions_limit', 'image_resize_failed', 'image_resize_timeout',
   'image_webp_failed', 'image_webp_timeout',
   'media_hash_failed', 'source_loading', 'source_network_error', 'source_security_error', 'source_interrupted',
-  'source_unavailable', 'source_left_page', 'transition_timeout', 'retry_exhausted', 'exporter_binding_mismatch']);
+  'source_unavailable', 'source_left_page', 'transition_timeout', 'retry_exhausted', 'exporter_binding_mismatch',
+  'resume_structure_changed', 'resume_unavailable']);
 const FORMATS = new Set(['html', 'json', 'jpeg', 'png', 'gif', 'webp', 'pdf', 'unknown']);
 const TERMINAL_FILES = new Set(['downloaded', 'failed', 'skipped', 'unavailable']);
 const AUTHOR_STATES = new Set(['received', 'incomplete', 'unobserved', 'unknown']);
@@ -100,12 +101,18 @@ export function projectProblemEvent(value, defaultAt = new Date().toISOString())
     if (url) event[key] = url;
   }
   if (typeof value.browserLoading === 'boolean') event.browserLoading = value.browserLoading;
+  if (['request', 'reload', 'replace'].includes(value.recovery)) event.recovery = value.recovery;
+  if (typeof value.definitionRetrySkipped === 'boolean') event.definitionRetrySkipped = value.definitionRetrySkipped;
+  if (value.normalization === 'png_trailing_bytes_removed') {
+    event.normalization = value.normalization;
+    if (nonnegative(value.removedBytes)) event.removedBytes = value.removedBytes;
+  }
   for (const key of ['url', 'sourcePage', 'lastSavedUrl']) {
     const url = problemReportUrl(value[key]);
     if (url) event[key] = url;
   }
   if (typeof value.assetId === 'string' && /^asset-[a-zA-Z0-9_-]{1,64}$/.test(value.assetId)) event.assetId = value.assetId;
-  for (const key of ['attempt', 'declaredBytes', 'receivedBytes', 'elapsedMs', 'polls', 'totalFiles', 'remainingMs', 'retryDelayMs']) if (nonnegative(value[key])) event[key] = value[key];
+  for (const key of ['attempt', 'declaredBytes', 'receivedBytes', 'elapsedMs', 'polls', 'totalFiles', 'remainingMs', 'retryDelayMs', 'idleMs']) if (nonnegative(value[key])) event[key] = value[key];
   if (Number.isInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) event.httpStatus = value.httpStatus;
   for (const key of ['mimeType', 'effectiveMimeType']) {
     const mimeType = typeof value[key] === 'string' ? value[key].split(';')[0].trim().toLowerCase() : '';

@@ -1,4 +1,4 @@
-import { inspectRasterImage } from './raster-image-metadata.js';
+import { inspectRasterImage, rasterImageSource } from './raster-image-metadata.js';
 import { checkDecodeSize, fullHdSize, imagePreparationError, resizeRasterImage } from './fullhd-image.js';
 
 async function loadEncoder() {
@@ -32,8 +32,8 @@ export function createWebpEncodingSession({ createEncoder = loadEncoder, resizeR
     let metadata;
     try {
       metadata = await inspectRasterImage(blob, mimeType);
-    } catch {
-      throw imagePreparationError('image_dimensions_unverified');
+    } catch (error) {
+      throw error.reason ? error : imagePreparationError('image_dimensions_unverified');
     }
     if (!metadata) return { blob: null };
     const { width, height, orientation } = metadata;
@@ -42,7 +42,7 @@ export function createWebpEncodingSession({ createEncoder = loadEncoder, resizeR
     const [displayWidth, displayHeight] = orientation >= 5 ? [height, width] : [width, height];
     const [targetWidth, targetHeight] = fullHdSize(displayWidth, displayHeight);
     const resized = targetWidth !== displayWidth || targetHeight !== displayHeight;
-    const source = blob.type === metadata.mimeType ? blob : blob.slice(0, blob.size, metadata.mimeType);
+    const source = rasterImageSource(blob, metadata);
     if (!resized && metadata.mimeType === 'image/webp') return { blob: source, resized: false };
     try {
       const key = cacheEntries > 0 ? await sourceCacheKey(blob) : null;

@@ -1,8 +1,8 @@
 import { createWorkspace } from './state.js';
 import { createWorkspaceExportStore } from './workspace-export-store.js';
 import { isTrustedSourceOrigin } from './source-origins.js';
+import { createDurableWorkspaceScope } from './durable-workspace-scope.js';
 
-const SESSION_SCOPE = 'workspace-session-scope';
 const META_STORE = 'workspace-metadata';
 const RECORD_STORE = 'workspace-records';
 const TRANSACTION_STORES = [META_STORE, RECORD_STORE];
@@ -19,10 +19,11 @@ const bookIdentity = book => {
 
 export function createWorkspaceStore({ indexedDB = globalThis.indexedDB,
   sessionStorage = globalThis.chrome?.storage?.session,
+  localStorage = sessionStorage === globalThis.chrome?.storage?.session ? globalThis.chrome?.storage?.local : undefined,
   randomUUID = () => globalThis.crypto.randomUUID(), databaseName = 'deshar-material-export',
   IDBKeyRange = globalThis.IDBKeyRange } = {}) {
   let opening;
-  let scopeOpening;
+  const scope = createDurableWorkspaceScope({ localStorage, sessionStorage, randomUUID });
   const cache = new Map();
 
   function database() {
@@ -41,18 +42,6 @@ export function createWorkspaceStore({ indexedDB = globalThis.indexedDB,
       request.onerror = () => { opening = undefined; reject(request.error); };
     });
     return opening;
-  }
-
-  function scope() {
-    if (!scopeOpening) scopeOpening = (async () => {
-      if (!sessionStorage) throw new Error('Не удалось определить сессию локального сбора.');
-      const previous = (await sessionStorage.get(SESSION_SCOPE))[SESSION_SCOPE];
-      if (typeof previous === 'string' && /^[a-zA-Z0-9-]{16,100}$/.test(previous)) return previous;
-      const token = randomUUID();
-      await sessionStorage.set({ [SESSION_SCOPE]: token });
-      return token;
-    })().catch(error => { scopeOpening = undefined; throw error; });
-    return scopeOpening;
   }
 
   function access(db, key, tabId, updater) {

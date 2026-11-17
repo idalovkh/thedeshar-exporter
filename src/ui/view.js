@@ -1,4 +1,7 @@
 import { exportReadiness } from "../lib/export-readiness.js";
+import { collectionResumeInfo } from "../lib/collection-resume.js";
+import { sourceBookKey } from "../lib/book-workspaces.js";
+import { navigationBlockMessage } from "../lib/navigation-block-reasons.js";
 
 function isBookContents(source) {
   try {
@@ -9,19 +12,30 @@ function isBookContents(source) {
 }
 
 /** Present collection state without claiming that every exercise was exported. */
-export function getView({ state = {}, sourceAvailable = false, source = null, collecting = false, downloading = false, busy = false } = {}) {
+export function getView({ state = {}, sourceAvailable = false, source = null, sourceNavigation = null, collecting = false, downloading = false, busy = false } = {}) {
   const hasData = Boolean(state.snapshots?.length || state.captures?.length);
   const report = state.collection;
   const readiness = exportReadiness(state);
   const lessons = Array.isArray(report?.items) ? report.items.filter((item) => item?.kind === "lesson") : [];
   const bookContents = isBookContents(source);
+  const navigationBlocked = sourceAvailable && sourceNavigation?.blocked === true;
   const lessonsDone = lessons.filter((item) => item.status === "visited").length;
   const currentLesson = lessons.find((item) => item.status === "running")?.title || "";
+  const resume = collectionResumeInfo(state);
+  const structureChanged = report?.diagnostics?.failure?.reason === "resume_structure_changed";
+  const sourceKey = sourceBookKey(source?.url);
+  const sameBook = Boolean(sourceKey && sourceKey === sourceBookKey(report?.rootUrl));
+  const lessonPage = Boolean(sourceKey && /^\/lesson-editor\/book\/\d+\/lesson\/\d+(?:\/section(?:\/(?:\d+|for-homework))?)?\/?$/.test(new URL(source.url).pathname));
+  const canResume = resume.available && !structureChanged && report?.status !== "finished" && !state.dropped && !state.enabled && !state.collectionLocked &&
+    sourceAvailable && !navigationBlocked && sameBook && (bookContents || lessonPage) && !busy && !collecting && !downloading;
   const common = {
-    canCollect: sourceAvailable && bookContents && !busy && !collecting && !downloading,
+    canCollect: sourceAvailable && !navigationBlocked && (bookContents || canResume) && !busy && !collecting && !downloading,
     canExport: readiness.allowed && !state.enabled && !busy && !collecting && !downloading,
     hasData,
-    collectLabel: hasData ? "Собрать заново" : "Собрать книгу",
+    canResume: Boolean(canResume),
+    collectLabel: canResume ? "Продолжить сбор" : hasData ? "Собрать заново" : "Собрать книгу",
+    confirmedSections: resume.confirmedSections,
+    startedAt: resume.startedAt,
     lessonsDone,
     lessonsTotal: lessons.length,
     currentLesson,
@@ -36,6 +50,21 @@ export function getView({ state = {}, sourceAvailable = false, source = null, co
       ? `Собрано уроков: ${lessonsDone} из ${lessons.length}.${currentLesson ? ` Сейчас: ${currentLesson}.` : ""}`
       : "";
     return view("collecting", "Сбор книги", `${progress ? `${progress} ` : ""}Оставьте обе вкладки открытыми и не переключайте страницы книги.`, "Книга");
+  }
+  if (navigationBlocked && !common.canExport) {
+    const reason = navigationBlockMessage(sourceNavigation.blockedReasonCode);
+    return view("warning", "Сбор книги заблокирован",
+      reason || "Проверьте список уроков и разделов в исходной вкладке.", "Обход заблокирован");
+  }
+  if (structureChanged) {
+    return view("partial", "Структура книги изменилась", "Сохранённые материалы оставлены. Выберите «Собрать заново», чтобы получить текущую структуру и задания книги.", "Нужен новый сбор");
+  }
+  if (resume.available && report?.status !== "finished" && !state.dropped) {
+    return view("partial", "Сбор можно продолжить", canResume
+      ? bookContents
+        ? "Подтверждённые разделы сохранены. Нажмите «Продолжить сбор»: проверим доступ и структуру книги, затем соберём оставшиеся разделы."
+        : "Подтверждённые разделы сохранены. Нажмите «Продолжить сбор»: вернёмся к содержанию книги, проверим доступ и структуру, затем соберём оставшиеся разделы."
+      : "Подтверждённые разделы сохранены. Откройте содержание этой книги и нажмите значок exporter, чтобы продолжить сбор.", "Сбор не завершён");
   }
   if (report?.status === "running") {
     return view("partial", "Сбор пока не завершён", hasData

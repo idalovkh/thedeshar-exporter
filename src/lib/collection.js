@@ -5,10 +5,15 @@ import { isSourceUrl } from './state.js';
 import { appendCollectionDiagnostic, createCollectionDiagnostics, recordCollectionFailure } from './collection-diagnostics.js';
 import { navigationDiagnostic } from './navigation-diagnostics.js';
 import { exporterBindingDiagnostic } from './exporter-binding-diagnostics.js';
+import { createCollectionResume } from './collection-resume.js';
+import { confirmedLessonRoute } from './confirmed-lesson-route.js';
+import { resumeCollectionEntry, refreshResumeCollectionEntry } from './resume-collection-entry.js';
+import { startCollectionNavigation } from './start-collection-navigation.js';
+import { navigationBlockMessage } from './navigation-block-reasons.js';
 
 // The dashboard drives a bounded, read-only tour using the source's own navigation.
 // Every checkpoint is persisted; closing the dashboard leaves an unfinished report.
-export async function collectBook({ request, signal, reset = false, extensionVersion, onProgress = () => {}, onDiagnostic = () => {}, wait = ms => new Promise(resolve => setTimeout(resolve, ms)), now = () => performance.now(), pollMs = 700, attempts, fastPollMs = 250, quietMs = 500, pendingGraceMs = 5000, maxPages = Infinity,
+export async function collectBook({ request, signal, reset = false, mode = 'new', resumeState = null, extensionVersion, onProgress = () => {}, onDiagnostic = () => {}, wait = ms => new Promise(resolve => setTimeout(resolve, ms)), now = () => performance.now(), pollMs = 700, attempts, fastPollMs = 250, quietMs = 500, pendingGraceMs = 5000, maxPages = Infinity,
   transitionTimeoutMs = TRANSITION_TIMEOUT_MS, retryAfterMs = attempts === undefined ? TRANSITION_RETRY_AFTER_MS : attempts * pollMs,
   retryDelaysMs = TRANSITION_RETRY_DELAYS_MS }) {
   const diagnostics = createCollectionDiagnostics(extensionVersion);
@@ -18,6 +23,7 @@ export async function collectBook({ request, signal, reset = false, extensionVer
   let lastSavedUrl = '';
   let target = {};
   let step;
+  let resume;
   const elapsed = () => Math.max(0, Math.round(now() - step.startedAt));
   const log = (status, details = {}) => {
     appendCollectionDiagnostic(diagnostics, {
@@ -44,7 +50,7 @@ export async function collectBook({ request, signal, reset = false, extensionVer
   const visitedLessons = new Set();
   const check = () => { if (signal?.aborted) throw new DOMException('Обход остановлен.', 'AbortError'); };
   const send = request;
-  const runMutations = new Set(['END_COLLECTION', 'SAVE_COLLECTION', 'START_CAPTURE', 'STOP_CAPTURE', 'CLEAR_CAPTURE', 'TAKE_SNAPSHOT', 'PREPARE_BOOK', 'OPEN_MATERIAL_ITEM', 'NAVIGATE_SOURCE', 'RETRY_SOURCE_NAVIGATION', 'GET_SOURCE_STATUS']);
+  const runMutations = new Set(['END_COLLECTION', 'SAVE_COLLECTION', 'START_CAPTURE', 'STOP_CAPTURE', 'CLEAR_CAPTURE', 'TAKE_SNAPSHOT', 'PREPARE_BOOK', 'OPEN_MATERIAL_ITEM', 'OPEN_CONFIRMED_LESSON', 'NAVIGATE_SOURCE', 'RETRY_SOURCE_NAVIGATION', 'GET_SOURCE_STATUS', 'RETRY_DEFINITION_REQUEST', 'REPLACE_SOURCE_TAB']);
   request = async (type, payload) => {
     if (!['STOP_CAPTURE', 'SAVE_COLLECTION', 'END_COLLECTION'].includes(type)) check();
     const response = await send(type, { ...payload, ...(runMutations.has(type) ? { collectionId } : {}) });
@@ -63,16 +69,7 @@ export async function collectBook({ request, signal, reset = false, extensionVer
     lastPageObservation = undefined;
     transition = createCollectionTransition({ request, now, wait, signal, timeoutMs: transitionTimeoutMs,
       attemptTimeoutMs: retryAfterMs, retryDelaysMs });
-    try {
-      const response = await transition.run(() => request(type, { ...payload, sourceTimeoutMs: Math.min(10_000, transition.remaining()) }));
-      transition.accept(response.transition);
-      return response;
-    } catch (error) {
-      if (!['source_timeout', 'source_disconnected', 'source_loading', 'source_network_error'].includes(error.code)) throw error;
-      const status = await transition.status();
-      transition.accept({ id: status?.transitionId, deadlineAt: status?.deadlineAt, attempt: status?.attempt, maxAttempts: status?.maxAttempts });
-      return { transition: status };
-    }
+    return startCollectionNavigation({ transition, request, type, payload, pollMs });
   };
   const checkpoint = async () => { await request('SAVE_COLLECTION', { collection: structuredClone(report) }); onProgress(structuredClone(report)); };
   const partialWarning = 'Обход охватывает только загруженные элементы страницы; отсутствие других уроков и разделов не подтверждается.';
@@ -82,7 +79,8 @@ export async function collectBook({ request, signal, reset = false, extensionVer
       return isSourceUrl(url) ? `${url.origin}${url.pathname}` : '';
     } catch { return ''; }
   };
-  const blockedReason = nav => nav.warnings?.filter(warning => warning !== partialWarning).at(-1) || nav.readinessReason || 'Навигация на странице недоступна для автоматического обхода.';
+  const blockedReason = nav => navigationBlockMessage(nav.blockedReasonCode) || nav.warnings?.filter(warning => warning !== partialWarning).at(-1) ||
+    nav.readinessReason || 'Навигация на странице недоступна для автоматического обхода.';
   const checkRetainedData = state => {
     if (state.dropped) throw new Error(`${state.warnings?.at(-1) || 'Достигнут лимит хранения.'} Обход остановлен: часть исходных данных не сохранена.`);
   };
@@ -96,6 +94,8 @@ export async function collectBook({ request, signal, reset = false, extensionVer
   };
   const intervalFor = nav => networkOf(nav) ? Math.min(fastPollMs, pollMs) : pollMs;
   const pageError = (reason, context, url = lastUrl, code) => Object.assign(new Error(`${context}: ${reason}${diagnosticUrl(url) ? ` Страница: ${diagnosticUrl(url)}.` : ''}`), { code, url: diagnosticUrl(url) });
+  const blockedPageError = (nav, context) => Object.assign(pageError(blockedReason(nav), context, nav.url, 'navigation_blocked'),
+    { blockedReasonCode: nav.blockedReasonCode, lessonButton: nav.lessonButton });
   const activeSection = nav => nav?.items?.find(item => item.active && (item.kind === 'section' || item.kind === 'homework'));
   const sectionIdFor = url => url.match(/\/section\/(\d+|for-homework)\/?$/)?.[1];
   const observation = nav => ({ exerciseState: nav?.exerciseState, network: networkOf(nav), lessonId: nav?.lessonId, sectionId: sectionIdFor(nav?.url || ''),
@@ -152,10 +152,11 @@ export async function collectBook({ request, signal, reset = false, extensionVer
           stable = 0;
           stableMs = 0;
           interval = intervalFor(nav);
+          if (!transition.attemptRemaining()) break;
           await pause(interval);
           continue;
         }
-        if (nav) { documentLoaded = true; lastFailureContext = undefined; lastPageObservation = observation(nav); }
+        if (nav) { documentLoaded = true; lastFailureContext = undefined; lastPageObservation = observation(nav); transition.progress(nav); }
         if (remaining() <= 0) break;
         if (prepareBook && nav?.kind === 'book' && !nav.blocked && matches(nav)) {
           if (skipPrepare > 0) skipPrepare--;
@@ -176,7 +177,7 @@ export async function collectBook({ request, signal, reset = false, extensionVer
         if (error.name === 'AbortError') throw error;
         if (!['source_disconnected', 'source_timeout', 'source_loading', 'source_network_error', 'source_unavailable'].includes(error.code)) {
           throw Object.assign(pageError(error.message, context, observedUrl || lastUrl, error.code), { networkError: error.networkError,
-            binding: exporterBindingDiagnostic(error.binding),
+            binding: exporterBindingDiagnostic(error.binding), blockedReasonCode: error.blockedReasonCode, lessonButton: error.lessonButton,
             expectedUrl: error.expectedUrl, observedUrl: error.observedUrl, navigation: navigationDiagnostic(error.navigation) });
         }
         reason = error.message;
@@ -215,6 +216,20 @@ export async function collectBook({ request, signal, reset = false, extensionVer
         // Slow or temporarily missing source replies do not prove a failed
         // navigation. Keep observing the same transition within its deadline.
         observed = undefined;
+        if (!transition.attemptRemaining()) {
+          const idleMs = Math.floor(transition.idleMs());
+          const result = await transition.recover(code);
+          if (!result) {
+            if (transition.attempt() < MAX_TRANSITION_ATTEMPTS && remaining()) { await pause(interval); continue; }
+            throw pageError(reason, context, lastUrl, code);
+          }
+          startStage(result.recovery === 'replace' ? 'replace_source' : result.recovery === 'request' ? 'retry_definition' : 'reload_section', transition.attempt());
+          log('retrying', { reason: code, recovery: result.recovery, idleMs, definitionRetrySkipped: result.definitionRetrySkipped });
+          previousDocumentToken = result.previousDocumentToken || '';
+          reloaded = result.reloaded === true; documentLoaded = !previousDocumentToken;
+          previous = ''; stable = 0; stableMs = 0; visitToken = ''; visitDocument = ''; observationKey = undefined;
+          continue;
+        }
         if (observationKey !== code) log('waiting', { reason: code, polls });
         observationKey = code;
         previous = '';
@@ -225,7 +240,7 @@ export async function collectBook({ request, signal, reset = false, extensionVer
       check();
       if (diagnosticUrl(nav?.url)) lastUrl = diagnosticUrl(nav.url);
       if (confirmedUrl && observedUrl && observedUrl !== confirmedUrl) throw pageError(changedSource, context, observedUrl, 'source_changed');
-      if (nav?.blocked) throw pageError(blockedReason(nav), context, nav.url, 'navigation_blocked');
+      if (nav?.blocked) throw blockedPageError(nav, context);
       code = undefined;
       interval = intervalFor(nav);
       const network = networkOf(nav);
@@ -282,10 +297,7 @@ export async function collectBook({ request, signal, reset = false, extensionVer
         previous = '';
         stable = 0;
       }
-      if (!transition.attemptRemaining() && !(matched && nav.ready && authorReady)) {
-        const status = await transition.status();
-        if (!status?.browserLoading && status?.state !== 'loading' && !(network && network.pending > 0)) break;
-      }
+      if (!transition.attemptRemaining() && !(matched && nav.ready && authorReady)) break;
       await pause(interval);
     }
     if (!documentLoaded) {
@@ -312,10 +324,10 @@ export async function collectBook({ request, signal, reset = false, extensionVer
   }
   function settleLessonPage(matches, context, verifySections) {
     return settleSection({ matches, context, verifySections, settled, request, activeSection,
-      startStage, log, pageError, transition, pollMs });
+      startStage, log, pageError, blockedPageError, transition, pollMs });
   }
   function settleBookPage(matches, context, previousDocumentToken) {
-    return settleSection({ matches, context, settled, request, activeSection, startStage, log, pageError, transition, pollMs,
+    return settleSection({ matches, context, settled, request, activeSection, startStage, log, pageError, blockedPageError, transition, pollMs,
       initialOptions: { watchSection: false, prepareBook: true, previousDocumentToken } });
   }
   async function save(nav, onSaved = () => {}) {
@@ -336,6 +348,10 @@ export async function collectBook({ request, signal, reset = false, extensionVer
       ? { dropped: retained.dropped, warnings: typeof retained.warning === 'string' ? [retained.warning] : [] }
       : (await request('GET_STATE', { summary: true })).state;
     checkRetainedData(state);
+    const section = nav.kind === 'lesson' && activeSection(nav);
+    if (section && retained?.authorData === true && nav.sectionVisit?.received === true) {
+      resume.confirm(savedUrl, nav.lessonId, section.key, retained.capturedAt);
+    }
     log('saved', { authorData: retained?.authorData === true ? 'received' : undefined });
     onSaved(nav);
     await checkpoint();
@@ -343,28 +359,57 @@ export async function collectBook({ request, signal, reset = false, extensionVer
   }
   try {
     const { navigation: initial } = await request('GET_NAVIGATION');
-    if (initial?.blocked) throw pageError(blockedReason(initial), 'Содержание учебника', initial.url, 'navigation_blocked');
-    if (initial?.kind !== 'book') throw pageError(initial?.readinessReason || 'Откройте содержание книги со списком уроков и дождитесь загрузки.', 'Содержание учебника', initial?.url);
-    report.rootUrl = initial.url;
-    report.title = titleOf(initial.title);
+    if (initial?.blocked) throw blockedPageError(initial, 'Содержание учебника');
+    if (!['new', 'resume'].includes(mode)) throw new Error('Неизвестный режим сбора.');
+    const entry = initial?.kind !== 'book' && mode === 'resume' ? resumeCollectionEntry(resumeState, initial) : null;
+    if (initial?.kind !== 'book' && !entry) throw pageError(initial?.readinessReason || 'Откройте содержание книги со списком уроков и дождитесь загрузки.', 'Содержание учебника', initial?.url);
+    report.rootUrl = entry?.rootUrl || initial.url;
+    report.title = titleOf(entry ? entry.title : initial.title);
     lastUrl = initial.url;
+    resume = createCollectionResume(mode === 'resume' ? resumeState : null, report.rootUrl);
+    report.resume = resume.checkpoint;
+    if (mode === 'resume') {
+      report.startedAt = resumeState.collection.startedAt || report.startedAt;
+      report.expected = resume.checkpoint.confirmed.map(page => page.url);
+      report.visited = [...report.expected];
+      lastSavedUrl = report.visited.at(-1) || '';
+    }
     const origin = new URL(initial.url).origin;
     const sameBook = nav => nav.materialId === initial.materialId && new URL(nav.url).origin === origin;
-    report.items = (initial.items || []).filter(item => item.kind === 'lesson').map(item => ({ key: item.key, title: item.title, kind: 'lesson', status: 'pending' }));
-    await request('BEGIN_COLLECTION');
+    report.items = (entry ? resume.checkpoint.book : initial.items || []).filter(item => item.kind === 'lesson').map(item => ({ key: item.key, title: item.title, kind: 'lesson', status: 'pending' }));
+    await request('BEGIN_COLLECTION', { mode });
     ownsCollection = true;
-    if (reset) await request('CLEAR_CAPTURE');
+    if (reset && mode !== 'resume') await request('CLEAR_CAPTURE');
     await checkpoint();
     await request('START_CAPTURE');
     startedCapture = true;
+    const entryPage = entry ? await refreshResumeCollectionEntry(request, initial) : initial;
     // Capture must be active before the initial book response arrives.
-    await beginTransition('NAVIGATE_SOURCE', { url: report.rootUrl, expectedUrl: initial.url, expectedDocumentToken: initial.documentToken });
+    await beginTransition('NAVIGATE_SOURCE', { url: report.rootUrl, expectedUrl: entryPage.url, expectedDocumentToken: entryPage.documentToken,
+      ...(entry && entryPage.sectionVisit?.token ? { expectedVisitToken: entryPage.sectionVisit.token } : {}) });
     let book = await settleBookPage(nav => sameBook(nav) && nav.kind === 'book', 'Содержание учебника', initial.documentToken);
     report.title = titleOf(book.title) || report.title;
     const lessons = book.items.filter(item => item.kind === 'lesson');
+    resume.book(lessons);
     report.items = lessons.map(item => ({ key: item.key, title: item.title, kind: 'lesson', status: 'pending' }));
-    book = await save(book);
-    for (const lesson of lessons) {
+    const retainedRoot = mode === 'resume' && resumeState.snapshots.find(snapshot => diagnosticUrl(snapshot.url) === diagnosticUrl(book.url));
+    if (retainedRoot) {
+      report.expected.unshift(retainedRoot.url);
+      report.visited.unshift(retainedRoot.url);
+      await checkpoint();
+    } else book = await save(book);
+    const rootInventory = book;
+    const outline = items => JSON.stringify(items.map(({ key, title, kind, sourceId }) => [key, title, kind, sourceId]));
+    let currentPage = book;
+    async function returnToContents(page) {
+      startStage('book');
+      await beginTransition('NAVIGATE_SOURCE', { url: report.rootUrl, expectedUrl: page.url, expectedDocumentToken: page.documentToken,
+        ...(page.sectionVisit?.token ? { expectedVisitToken: page.sectionVisit.token } : {}) });
+      book = await settleBookPage(nav => sameBook(nav) && nav.kind === 'book', 'Возврат к содержанию учебника', page.documentToken);
+      if (outline(book.items.filter(item => item.kind === 'lesson')) !== outline(lessons)) throw new Error('Список уроков изменился во время обхода. Повторите сбор из содержания книги.');
+      currentPage = book;
+    }
+    for (const [lessonIndex, lesson] of lessons.entries()) {
       target = { lessonTitle: lesson.title };
       startStage('open_lesson', 1);
       check();
@@ -379,16 +424,29 @@ export async function collectBook({ request, signal, reset = false, extensionVer
         firstLessonId ||= nav.lessonId;
         return nav.lessonId === firstLessonId;
       };
-      await beginTransition('OPEN_MATERIAL_ITEM', { key: lesson.key, expectedUrl: book.url, expectedDocumentToken: book.documentToken });
+      let openedDirectly = false;
+      if (currentPage.kind !== 'book' && confirmedLessonRoute(rootInventory, lesson)) {
+        try {
+          await beginTransition('OPEN_CONFIRMED_LESSON', { key: lesson.key, expectedUrl: currentPage.url,
+            expectedDocumentToken: currentPage.documentToken, expectedVisitToken: currentPage.sectionVisit.token });
+          openedDirectly = true;
+        } catch (error) {
+          if (error.code !== 'source_lesson_unconfirmed') throw error;
+          await returnToContents(currentPage);
+        }
+      }
+      if (!openedDirectly) await beginTransition('OPEN_MATERIAL_ITEM', { key: lesson.key, expectedUrl: book.url, expectedDocumentToken: book.documentToken });
       let page = await settleLessonPage(matches, context);
       if (visitedLessons.has(page.lessonId)) throw new Error('Разные карточки открыли один урок. Возможно, исходная вкладка была переключена. Обход остановлен.');
       visitedLessons.add(page.lessonId);
       lessonItem.url = page.url;
       lessonItem.lessonId = page.lessonId;
-      page = await save(page);
       const lessonId = page.lessonId;
       const sections = page.items.filter(item => item.kind === 'section' || item.kind === 'homework');
       if (!sections.length) throw new Error('Не найден список разделов урока. Обход остановлен для проверки.');
+      resume.lesson(lesson, lessonId, sections);
+      const firstSection = activeSection(page);
+      if (!firstSection || !resume.confirmed(page.url, firstSection.key)) page = await save(page);
       const expectedSections = JSON.stringify(sections.map(item => item.key));
       const verifySections = nav => {
         if (JSON.stringify(nav.items.filter(item => item.kind === 'section' || item.kind === 'homework').map(item => item.key)) !== expectedSections) throw Object.assign(new Error(sectionListChanged), { code: 'section_list_changed' });
@@ -398,13 +456,20 @@ export async function collectBook({ request, signal, reset = false, extensionVer
       for (const section of sections) {
         const item = report.items.find(item => item.key === section.key && item.lessonId === lessonId);
         const visit = (saved = page) => { item.url = saved.url; item.status = report.failed.some(failure => diagnosticUrl(failure.url) === diagnosticUrl(saved.url)) ? 'failed' : 'visited'; };
+        const previous = mode === 'resume' && resume.saved(lessonId, section.key);
+        if (previous) {
+          item.url = previous.url;
+          item.status = 'visited';
+          await checkpoint();
+          continue;
+        }
         if (!page.items.some(candidate => candidate.key === section.key && candidate.active)) {
           target = { lessonTitle: lesson.title, sectionTitle: section.title };
           startStage('open_section');
           const { navigation: current } = await request('GET_NAVIGATION', { expectedUrl: page.url, expectedDocumentToken: page.documentToken, expectedVisitToken: page.sectionVisit.token });
           if (current?.url !== page.url || current.kind !== 'lesson' || current.lessonId !== lessonId ||
             activeSection(current)?.key !== activeSection(page)?.key) throw pageError(changedSource, 'Открытие раздела', current?.url || page.url, 'source_changed');
-          if (current.blocked) throw pageError(blockedReason(current), 'Открытие раздела', current.url, 'navigation_blocked');
+          if (current.blocked) throw blockedPageError(current, 'Открытие раздела');
           verifySections(current);
           if (!current.ready) throw pageError(current.readinessReason || 'Страница ещё не готова к переходу.', 'Открытие раздела', current.url, 'navigation_stale');
           page = current;
@@ -428,10 +493,9 @@ export async function collectBook({ request, signal, reset = false, extensionVer
       lessonItem.status = report.items.some(item => item.lessonId === lessonId && item.kind !== 'lesson' && item.status === 'failed') ? 'failed' : 'visited';
       await checkpoint();
       target = {};
-      startStage('book');
-      await beginTransition('NAVIGATE_SOURCE', { url: report.rootUrl, expectedUrl: page.url, expectedDocumentToken: page.documentToken, expectedVisitToken: page.sectionVisit.token });
-      book = await settleBookPage(nav => sameBook(nav) && nav.kind === 'book', 'Возврат к содержанию учебника', page.documentToken);
-      if (JSON.stringify(book.items.map(item => item.key)) !== JSON.stringify(lessons.map(item => item.key))) throw new Error('Список уроков изменился во время обхода. Повторите сбор из содержания книги.');
+      currentPage = page;
+      const next = lessons[lessonIndex + 1];
+      if (!next || !confirmedLessonRoute(rootInventory, next)) await returnToContents(page);
     }
     // Drain queued source events before claiming completion. A capture issue
     // arriving after the final snapshot must still leave an incomplete report.
@@ -449,6 +513,8 @@ export async function collectBook({ request, signal, reset = false, extensionVer
     recordFailure(reason, error.url || lastUrl || report.rootUrl, report.status, error.logged, {
       ...(error.pageNavigation ? observation(error.pageNavigation) : lastPageObservation),
       binding: exporterBindingDiagnostic(error.binding),
+      blockedReasonCode: error.blockedReasonCode,
+      lessonButton: error.lessonButton,
       networkError: error.networkError, expectedUrl: error.expectedUrl || error.url || lastUrl,
       observedUrl: error.observedUrl, navigation: navigationDiagnostic(error.navigation),
       attempt: transition?.attempt(), remainingMs: transition ? Math.floor(transition.remaining()) : undefined,

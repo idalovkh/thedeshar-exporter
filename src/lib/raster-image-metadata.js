@@ -1,4 +1,5 @@
 import { crc32 } from './archive.js';
+import { createPngStreamValidator } from './png-stream-validator.js';
 
 const PNG = [137, 80, 78, 71, 13, 10, 26, 10];
 const RASTER_TYPES = new Set(['image/png', 'image/apng', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif']);
@@ -123,8 +124,9 @@ async function pngMetadata(read, size) {
       requireMetadata(u32(frame, 12) + frameSize.width <= image.width && u32(frame, 16) + frameSize.height <= image.height);
     }
     if (type === 'IEND') {
-      requireMetadata(hasImage && length === 0 && offset === size && frames === frameCount);
+      requireMetadata(hasImage && length === 0 && frames === frameCount);
       return { ...image, orientation, animated: frameCount > 0, ...(frameCount ? { frameCount } : {}),
+        ...(offset < size ? { pngBytes: offset } : {}),
         ...(orientation !== 1 ? { orientationChunk } : {}) };
     }
   }
@@ -495,5 +497,20 @@ export async function inspectRasterImage(blob, mimeType = blob.type) {
     requireMetadata(!RASTER_TYPES.has(mimeType));
     return null;
   }
-  return { mimeType: actualType, ...await PARSERS[actualType](blobReader(blob), blob.size) };
+  const metadata = { mimeType: actualType, ...await PARSERS[actualType](blobReader(blob), blob.size) };
+  if (metadata.pngBytes) {
+    const validator = createPngStreamValidator();
+    const prefix = blob.slice(0, metadata.pngBytes);
+    const reader = prefix.stream().getReader();
+    try {
+      for (;;) { const { done, value } = await reader.read(); if (done) break; validator.feed(value); }
+      requireMetadata(validator.finish() === metadata.pngBytes);
+    } finally { reader.releaseLock(); }
+  }
+  return metadata;
+}
+
+export function rasterImageSource(blob, metadata) {
+  const size = metadata.pngBytes ?? blob.size;
+  return size === blob.size && blob.type === metadata.mimeType ? blob : blob.slice(0, size, metadata.mimeType);
 }

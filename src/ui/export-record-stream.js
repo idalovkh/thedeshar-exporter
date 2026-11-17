@@ -9,7 +9,7 @@ const captureFields = ['kind', 'url', 'sourceUrl', 'pageUrl', 'receivedAt', 'cap
 const pick = (record, fields) => Object.fromEntries(fields.filter(field => record[field] !== undefined).map(field => [field, record[field]]));
 
 async function writeRecord(spool, name, record, signal) {
-  const text = `${JSON.stringify(redactSensitive(record))}\n`;
+  const text = `${JSON.stringify(record)}\n`;
   const writer = await spool.open(name);
   const encoder = new TextEncoder();
   try {
@@ -50,12 +50,17 @@ export async function prepareDiskExport(summary, { send, spool, signal, source, 
       signal?.throwIfAborted();
       if (batch.revision !== info.revision) throw changed();
       if (batch.total !== count || batch.nextOffset !== offset + 1 || !Array.isArray(batch.records) || batch.records.length !== 1) throw invalid();
-      const record = batch.records[0];
-      if (!record || typeof record !== 'object') throw invalid();
+      const original = batch.records[0];
+      if (!original || typeof original !== 'object') throw invalid();
+      const record = redactSensitive(original);
       const number = String(offset + 1).padStart(5, '0');
       originals.set(`originals/${directory}/${number}.json`, await writeRecord(spool, `${directory}-${number}.json`, record, signal));
       const assets = kind === 'snapshots' ? collectAssets([record]) : collectAssets([], [record]);
+      const originalAssets = new Map((kind === 'snapshots' ? collectAssets([original]) : collectAssets([], [original]))
+        .filter(asset => asset.downloadUnavailable).map(asset => [asset.url, asset]));
       for (const asset of assets) {
+        const originalAsset = originalAssets.get(asset.url);
+        if (originalAsset) { asset.downloadUnavailable = true; asset.reason = originalAsset.reason; }
         if (!found.has(asset.url)) found.set(asset.url, { ...asset, id: `asset-${String(found.size + 1).padStart(4, '0')}` });
         else if (!found.get(asset.url).sourcePage && asset.sourcePage) found.get(asset.url).sourcePage = asset.sourcePage;
       }

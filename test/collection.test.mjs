@@ -176,6 +176,18 @@ function fakeSource(options = {}) {
       }
       return { ok: true, key: target.key, kind: target.kind, title: target.title };
     }
+    if (type === 'OPEN_CONFIRMED_LESSON') {
+      assert.equal(ownsCollection, true);
+      assert.equal(message.collectionId, collectionId);
+      assert.equal(message.expectedUrl, current.url);
+      assert.equal(message.expectedDocumentToken, documentToken());
+      const inventory = options.bookOnNavigation?.(navigations) || options.initialBook || fixture.book();
+      const target = inventory.items.find(item => item.key === message.key);
+      assert.match(target?.sourceId || '', /^\d+$/, 'Only a source-confirmed lesson can bypass the contents');
+      documentGeneration++;
+      transition(fixture.lesson(Number(target.sourceId)));
+      return { ok: true };
+    }
     if (type === "TAKE_SNAPSHOT") {
       assert.equal(ownsCollection, true);
       assert.equal(message.expectedUrl, current.url);
@@ -609,21 +621,19 @@ test("a temporary source RPC timeout during a transition is retried before faili
   stoppedAndPersisted(source, "finished");
 });
 
-test('slow browser loading beyond sixty seconds finishes without restarting a progressing page', async () => {
+test('slow browser loads completing within each inactivity window need no restart', async () => {
   let clock = 0;
-  const events = [];
-  const source = fakeSource({ lessonIds: [34], loadingPolls: 70,
+  const source = fakeSource({ lessonIds: [34], loadingPolls: 20,
     sourceStatus: () => ({ state: 'loading', browserLoading: true, canRetry: false }) });
   const report = await collect(source, { attempts: undefined, pollMs: 1000, transitionTimeoutMs: 180000,
-    now: () => clock, wait: async ms => { clock += ms; }, onDiagnostic: event => events.push(event) });
+    now: () => clock, wait: async ms => { clock += ms; } });
   assert.equal(report.status, 'finished', JSON.stringify(report.failed));
   assert.ok(clock > 60000);
-  assert.ok(events.some(event => event.status === 'waiting' && event.elapsedMs >= 60000));
   assert.equal(source.calls.filter(call => call.type === 'RETRY_SOURCE_NAVIGATION').length, 0);
   assert.equal(source.snapshots.length, 4);
 });
 
-test('pending author requests beyond sixty seconds are allowed to complete without a reload', async () => {
+test('pending author requests completing within the inactivity window need no reload', async () => {
   let clock = 0, slowPolls = 0;
   const fixture = navigationFixture();
   const source = fakeSource({ lessonIds: [34],
@@ -638,7 +648,7 @@ test('pending author requests beyond sixty seconds are allowed to complete witho
   assert.ok(source.snapshots.some(page => page.url === stalledUrl));
 });
 
-test('a source request that stays pending reaches the three-minute deadline without a destructive restart', async () => {
+test('a hung source request is reloaded and replaced once before stopping with earlier pages intact', async () => {
   let clock = 0, targetStarted;
   const source = fakeSource({ lessonIds: [34], sectionOnOpen: page => {
     if (page.url !== stalledUrl) return page;
@@ -648,8 +658,9 @@ test('a source request that stays pending reaches the three-minute deadline with
   const report = await collect(source, { attempts: undefined, pollMs: 1000, transitionTimeoutMs: 180000,
     now: () => clock, wait: async ms => { clock += ms; } });
   assert.equal(report.status, 'failed');
-  assert.equal(clock - targetStarted, 180000);
-  assert.equal(source.calls.filter(call => call.type === 'RETRY_SOURCE_NAVIGATION').length, 0);
+  assert.equal(clock - targetStarted, 150000);
+  assert.equal(source.calls.filter(call => call.type === 'RETRY_SOURCE_NAVIGATION').length, 1);
+  assert.equal(source.calls.filter(call => call.type === 'REPLACE_SOURCE_TAB').length, 1);
   assert.deepEqual(report.visited, [bookUrl, lessonUrl(34, '56')]);
   assert.equal(source.snapshots.some(page => page.url === stalledUrl), false);
 });
@@ -710,7 +721,8 @@ test('native recovery and author-data reloads share one three-attempt budget', a
   });
   const report = await collect(source);
   assert.equal(report.status, 'failed');
-  assert.equal(source.calls.filter(call => call.type === 'RETRY_SOURCE_NAVIGATION').length, 2);
+  assert.equal(source.calls.filter(call => call.type === 'RETRY_SOURCE_NAVIGATION').length, 1);
+  assert.equal(source.calls.filter(call => call.type === 'REPLACE_SOURCE_TAB').length, 1);
   assert.equal(report.diagnostics.failure.reason, 'author_data_missing');
   assert.equal(report.diagnostics.failure.attempt, 3);
   assert.deepEqual(report.visited, [bookUrl]);
@@ -725,8 +737,8 @@ test("an unrecovered disconnect retains the reconnect instruction and book stage
   assert.match(report.failed[0].error, /Содержание учебника: Нет связи с учебником/);
   assert.match(report.failed[0].error, /Переподключить учебник/);
   assert.ok(report.failed[0].error.includes(bookUrl));
-  assert.equal(source.calls.filter(call => call.type === "GET_NAVIGATION").length, 28,
-    'Read-only recovery uses the whole shared deadline without resetting or reloading');
+  assert.equal(source.calls.filter(call => call.type === "GET_NAVIGATION").length, 30,
+    'The shared deadline bounds polling and the additional recovery checks');
   stoppedAndPersisted(source, "failed");
 });
 
@@ -852,15 +864,15 @@ test('a timeout while rechecking a stalled section is read again within the same
   assert.ok(report.visited.includes(stalledUrl));
 });
 
-test('a browser load beginning during an author-data retry is observed without resetting the budget', async () => {
+test('a browser load cannot veto recovery, and a subsequently ready section is retained', async () => {
   let statusReads = 0, stalledReads = 0;
   const source = fakeSource({ sectionOnOpen: stallSection,
-    finalNavigation: page => page.url === stalledUrl && ++stalledReads >= 20 ? navigationFixture().lesson(34, '57') : page,
+    finalNavigation: page => page.url === stalledUrl && ++stalledReads >= 12 ? navigationFixture().lesson(34, '57') : page,
     sourceStatus: () => ++statusReads === 1 ? {} : { state: 'loading', browserLoading: true, canRetry: false },
   });
   const report = await collect(source);
   assert.equal(report.status, 'finished', JSON.stringify(report.failed));
-  assert.equal(source.calls.filter(call => call.type === 'RETRY_SOURCE_NAVIGATION').length, 0);
+  assert.equal(source.calls.filter(call => call.type === 'RETRY_SOURCE_NAVIGATION').length, 1);
   assert.ok(report.visited.includes(stalledUrl));
 });
 
@@ -994,6 +1006,8 @@ test('same-title lessons retain separate source IDs throughout a complete tour',
   assert.equal(report.status, 'finished');
   const lessons = report.items.filter(item => item.kind === 'lesson');
   assert.deepEqual(lessons.map(item => [item.title, item.lessonId, item.status]), [['Test', '34', 'visited'], ['Test', '35', 'visited']]);
+  assert.equal(source.calls.filter(call => call.type === 'OPEN_CONFIRMED_LESSON').length, 1);
+  assert.equal(source.calls.filter(call => call.type === 'NAVIGATE_SOURCE').length, 2, 'Only initial and final contents are reloaded');
 });
 
 test('a card with a known source ID cannot save a different redirected lesson', async () => {

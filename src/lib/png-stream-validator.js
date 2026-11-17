@@ -8,7 +8,7 @@ const upper = value => value >= 65 && value <= 90;
 const letter = value => upper(value) || value >= 97 && value <= 122;
 
 /** Validate the PNG container and chunk CRCs without decoding pixels or retaining chunk data. */
-export function createPngStreamValidator({ maxBytes = 100 * 1024 * 1024 } = {}) {
+export function createPngStreamValidator({ maxBytes = 100 * 1024 * 1024, allowTrailing = false } = {}) {
   const header = new Uint8Array(8), ihdr = new Uint8Array(13), checksum = new Uint8Array(4);
   let phase = 'signature', signatureOffset = 0, headerOffset = 0, checksumOffset = 0;
   let inputBytes = 0, position = 0, chunkLength = 0, remaining = 0, chunkType = '', crc = 0;
@@ -64,7 +64,7 @@ export function createPngStreamValidator({ maxBytes = 100 * 1024 * 1024 } = {}) 
     if (inputBytes > maxBytes) fail('file_limit');
     let offset = 0;
     while (offset < bytes.byteLength) {
-      if (phase === 'ended') fail();
+      if (phase === 'ended') { if (allowTrailing) break; fail(); }
       if (phase === 'signature') {
         if (bytes[offset++] !== SIGNATURE[signatureOffset++]) fail('unsupported_content_type');
         position++;
@@ -94,6 +94,7 @@ export function createPngStreamValidator({ maxBytes = 100 * 1024 * 1024 } = {}) 
     if (failure) throw failure;
     if (signatureOffset < SIGNATURE.length) fail('unsupported_content_type');
     if (phase !== 'ended') fail();
+    return position;
   }
 
   return Object.freeze({ feed, finish });

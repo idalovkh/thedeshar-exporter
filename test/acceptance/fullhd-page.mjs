@@ -22,10 +22,10 @@ function prepare(blob, mimeType = blob.type) {
 }
 
 async function fixture(name, type) {
-  const response = await fetch(new URL(name, directory));
+  const response = await fetch(new URL(name.replace('-tail.png', '.png'), directory));
   check(response.ok, `${name}: fixture is unavailable`);
   const blob = await response.blob();
-  return blob.slice(0, blob.size, type);
+  return name.endsWith('-tail.png') ? new Blob([blob, new Uint8Array(6511).fill(37)], { type }) : blob.slice(0, blob.size, type);
 }
 
 async function sha256(bytes) {
@@ -152,8 +152,8 @@ async function checkPassthrough() {
   return { name, sourceBytes: source.size, webpBytes: blob.size };
 }
 
-async function checkCorruptPng() {
-  const name = 'corrupt.png';
+async function checkCorruptPng(trailing = false) {
+  const name = trailing ? 'corrupt-tail.png' : 'corrupt.png';
   const source = await fixture('small-transparent.png', 'image/png');
   const bytes = new Uint8Array(await source.arrayBuffer());
   const view = new DataView(bytes.buffer);
@@ -162,7 +162,7 @@ async function checkCorruptPng() {
   check(offset < bytes.length, `${name}: IDAT not found`);
   bytes.fill(0, offset + 8, offset + 8 + view.getUint32(offset));
   try {
-    await prepare(new Blob([bytes], { type: 'image/png' }));
+    await prepare(new Blob([bytes, ...(trailing ? [new Uint8Array(6511)] : [])], { type: 'image/png' }));
   } catch (error) {
     return { name, rejected: true, reason: error.message };
   }
@@ -205,7 +205,7 @@ globalThis.fullhdAcceptance = (async () => {
       catch (error) { failures.push({ name, message: error.message }); }
     };
     for (const [name, type, repeats] of [
-      ['animated.gif', 'image/gif', 2], ['animated.png', 'image/png', 1],
+      ['animated.gif', 'image/gif', 2], ['animated.png', 'image/png', 1], ['animated-tail.png', 'image/png', 1],
       ['animated.webp', 'image/webp', 1], ['animated.avif', 'image/avif', undefined],
       ['infinite.gif', 'image/gif', Infinity], ['once.gif', 'image/gif', 0],
     ]) {
@@ -214,19 +214,20 @@ globalThis.fullhdAcceptance = (async () => {
     await capture('portrait.webp', () => checkAnimation('portrait.webp', 'image/webp', 1, 560, 1920));
     await capture('portrait-animated.png', () => checkAnimation('portrait-animated.png', 'image/png', 1, 560, 1920));
     for (const [name, type] of [['portrait.jpg', 'image/jpeg'], ['portrait.png', 'image/png'],
-      ['portrait.avif', 'image/avif'], ['portrait-still.webp', 'image/webp']]) {
+      ['portrait.avif', 'image/avif'], ['portrait-still.webp', 'image/webp'], ['portrait-tail.png', 'image/png']]) {
       await capture(name, () => checkOrientation(name, type));
     }
     if (strictWebp) {
       for (const [name, type, options] of [
         ['boundary.jpg', 'image/jpeg'],
         ['small.jpg', 'image/jpeg', { declaredType: 'image/png', mustGrow: true }],
-        ['small-transparent.png', 'image/png', { transparent: true }],
+        ['small-transparent.png', 'image/png', { transparent: true }], ['small-transparent-tail.png', 'image/png', { transparent: true }],
         ['small.avif', 'image/avif'], ['depth-16.png', 'image/png'],
       ]) await capture(name, () => checkSameSize(name, type, options));
       await capture('small-animated.gif', () => checkAnimation('small-animated.gif', 'image/gif', 3, 96, 28, false));
       await capture('existing.webp', checkPassthrough);
       await capture('corrupt.png', checkCorruptPng);
+      await capture('corrupt-tail.png', () => checkCorruptPng(true));
     } else {
       const { blob } = await prepare(await fixture('boundary.jpg', 'image/jpeg'));
       check(blob === null, 'Full HD boundary image was replaced');

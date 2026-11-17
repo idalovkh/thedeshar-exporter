@@ -66,14 +66,6 @@ test('resolved URL aliases download once and keep their logical references', asy
   } finally { await spool.dispose(); }
 });
 
-test('three missing files terminate the attempt and cannot become a partial result', async () => {
-  const memory = memoryOPFS(), spool = await createExportSpool({ jobId: 'loss-cap', storage: memory.storage, locks: null });
-  try {
-    await assert.rejects(downloadDiskMedia([asset(1), asset(2), asset(3), asset(4)], { spool, resources: testResources(),
-      fetchFile: async () => new Response('Forbidden', { status: 403 }) }), { code: 'incomplete_export' });
-  } finally { await spool.dispose(); }
-});
-
 test('the disk network stage continues past six images while the sole codec is busy', async () => {
   const memory = memoryOPFS(), spool = await createExportSpool({ jobId: 'separate-stages', storage: memory.storage, locks: null });
   let fetched = 0, encoded = 0, release;

@@ -40,56 +40,99 @@
     return `${text.length}:${hash.toString(16)}`;
   }
 
-  function sourceIdentity(element, kind, route) {
-    const container = kind === 'lesson' ? element.closest('.unit_li') : element;
-    const attribute = kind === 'lesson' ? 'data-lesson-id' : kind === 'section' ? 'data-section-id' : '';
-    const id = attribute && [element, container].map(node => node?.getAttribute(attribute)).find(value => /^\d+$/.test(value || ''));
-    if (id) return id;
+  function linkedLesson(element, route) {
+    const href = element.getAttribute('href');
+    if (!href) return null;
     // Only known source routes identify a lesson/section. Generic DOM IDs and
     // Vue component internals do not provide a trustworthy material identity.
-    for (const link of [element, ...(container?.querySelectorAll('a[href]') || [])]) {
-      const href = link.getAttribute('href');
-      if (!href) continue;
-      let absolute;
-      try { absolute = new URL(href, location.href).href; } catch { continue; }
-      const target = routeFor(absolute);
-      if (target?.materialId !== route.materialId || target?.kind !== 'lesson') continue;
-      if (new URL(target.url).origin !== new URL(route.url).origin) continue;
-      if (kind === 'lesson') return target.lessonId;
-      if (kind === 'section' && target.lessonId === route.lessonId && /^\d+$/.test(target.sectionId || '')) return target.sectionId;
+    try {
+      const target = routeFor(new URL(href, location.href).href);
+      return target?.kind === 'lesson' && target.materialId === route.materialId &&
+        new URL(target.url).origin === location.origin ? target : null;
+    } catch { return null; }
+  }
+
+  function sectionIdentity(element, route) {
+    const id = element.getAttribute('data-section-id');
+    if (/^\d+$/.test(id || '')) return id;
+    for (const link of [element, ...element.querySelectorAll('a[href]')]) {
+      const target = linkedLesson(link, route);
+      if (target?.lessonId === route.lessonId && /^\d+$/.test(target.sectionId || '')) return target.sectionId;
     }
     return '';
   }
 
+  function lessonIdentities(button, card, route) {
+    const links = [button, ...card.querySelectorAll('a[href]')].filter(element => element.closest('.unit_li') === card);
+    const ids = [button.getAttribute('data-lesson-id'), card.getAttribute('data-lesson-id'),
+      ...links.map(link => linkedLesson(link, route)?.lessonId)];
+    return new Set(ids.filter(id => /^0*[1-9]\d*$/.test(id || '')));
+  }
+
+  function otherLessonAction(button) {
+    return ['edit_lesson', 'start_lesson', 'delete_lesson'].some(name => button.classList.contains(name)) ||
+      Boolean(button.querySelector('.iconedv-Edit,.iconedv-Delete')) ||
+      [button.innerText, button.getAttribute('aria-label'), button.getAttribute('title')].some(value =>
+        /^(?:(?:редактировать|изменить|начать|запустить|удалить)(?: урок)?|(?:edit|start|delete|remove)(?: lesson)?)$/i
+          .test(normalize(String(value || '').replace(/\p{Co}/gu, ' '))));
+  }
+
+  function selectLessonButton(card, route) {
+    const ownedVisible = selector => [...card.querySelectorAll(selector)]
+      .filter(button => button.closest('.unit_li') === card && visible(button));
+    const desktop = ownedVisible('button.open_lesson-desc');
+    const mobile = ownedVisible('button.open_lesson-mobile');
+    const buttons = [...new Set([...desktop, ...mobile])];
+    const reject = cause => ({ failure: {
+      desktopVisible: Math.min(desktop.length, MAX_ITEMS), mobileVisible: Math.min(mobile.length, MAX_ITEMS), cause,
+    } });
+    if (buttons.length !== 1) return reject(buttons.length ? 'multiple' : 'missing');
+
+    const [button] = buttons;
+    const identities = lessonIdentities(button, card, route);
+    if (identities.size > 1) return reject('identity');
+
+    const desktopButton = desktop.includes(button);
+    const recognized = desktopButton ? normalize(button.innerText) === 'Открыть урок' : Boolean(button.querySelector('.iconedv-Arrow-Right'));
+    const sourceId = identities.values().next().value || '';
+    if (otherLessonAction(button) || !recognized && !sourceId) return reject(desktopButton ? 'label' : 'icon');
+    if (!enabled(button)) return reject('disabled');
+    return { button, sourceId };
+  }
+
   function scan() {
     const route = routeFor(location.href);
-    if (!route) return { result: { url: '', kind: 'unsupported', materialId: null, lessonId: null, title: '', items: [], ready: false, blocked: true, contentSignature: '', warnings: ['Откройте содержание книги или редактор урока на учебной платформе.'] }, entries: [] };
+    if (!route) return { result: { url: '', kind: 'unsupported', materialId: null, lessonId: null, title: '', items: [], ready: false, blocked: true,
+      blockedReasonCode: 'unsupported_page', contentSignature: '', warnings: ['Откройте содержание книги или редактор урока на учебной платформе.'] }, entries: [] };
     const warnings = [PARTIAL_WARNING];
     const entries = [];
-    let blocked = false;
+    let blockedReasonCode = '';
+    let lessonButton;
+    const block = (code, warning) => {
+      if (warnings.includes(warning)) return;
+      warnings.push(warning);
+      blockedReasonCode = code;
+    };
     const scope = `${route.materialId}/${route.lessonId || 'book'}`;
     const titleCounts = new Map();
-    const add = (element, title, kind, active = false) => {
+    const add = (element, title, kind, active = false, sourceId = '') => {
       title = normalize(title);
       const unnamedSection = !title && kind === 'section' &&
         element.classList.contains('regular') && element.closest('.sections-list');
       if ((!title && !unnamedSection) || title.length > 500 || !enabled(element)) {
-        warnings.push('Некоторые элементы навигации недоступны или не имеют однозначного названия.');
-        blocked = true;
+        block('invalid_item', 'Некоторые элементы навигации недоступны или не имеют однозначного названия.');
         return;
       }
       const identity = `${kind}:${title}`;
       const occurrence = (titleCounts.get(identity) || 0) + 1;
       titleCounts.set(identity, occurrence);
-      const sourceId = sourceIdentity(element, kind, route);
       entries.push({ element, identity, sourceId, item: { key: sourceId ? `${scope}/${kind}/id/${sourceId}` : `${scope}/${kind}/${encodeURIComponent(title)}/${occurrence}`, title: title || 'Раздел без названия', kind, active,
         ...(sourceId ? { sourceId } : {}) } });
     };
     const limited = selector => {
       const elements = [...document.querySelectorAll(selector)].filter(visible);
       if (elements.length > MAX_ITEMS) {
-        warnings.push(`Найдено больше ${MAX_ITEMS} элементов навигации. Автоматический обход этой страницы остановлен.`);
-        blocked = true;
+        block('item_limit', `Найдено больше ${MAX_ITEMS} элементов навигации. Автоматический обход этой страницы остановлен.`);
       }
       return elements.slice(0, MAX_ITEMS);
     };
@@ -104,20 +147,19 @@
       const heading = [...document.querySelectorAll('h1')].find(element => visible(element) &&
         !element.closest('.unit_li,nav,aside,[role="navigation"]') && normalize(element.innerText));
       title = normalize(heading?.innerText).slice(0, 500);
-      for (const card of limited('.unit_li')) {
-        const desktop = [...card.querySelectorAll('button.open_lesson-desc')].filter(visible);
-        const mobile = [...card.querySelectorAll('button.open_lesson-mobile')].filter(visible);
-        const buttons = desktop.length ? desktop : mobile;
-        if (buttons.length !== 1 || desktop.length && normalize(buttons[0]?.innerText) !== 'Открыть урок' || !desktop.length && !buttons[0]?.querySelector('.iconedv-Arrow-Right')) {
-          warnings.push('Карточка урока не содержит единственную распознанную кнопку «Открыть урок».');
-          blocked = true;
+      for (const [index, card] of limited('.unit_li').entries()) {
+        const { button, sourceId, failure } = selectLessonButton(card, route);
+        if (failure) {
+          lessonButton ||= { cardIndex: index + 1, ...failure };
+          if (failure.cause === 'disabled') block('invalid_item', 'Некоторые элементы навигации недоступны или не имеют однозначного названия.');
+          else block('lesson_button', 'Карточка урока не содержит единственную распознанную кнопку «Открыть урок».');
           continue;
         }
-        const label = buttons[0].innerText;
+        const label = button.innerText;
         const text = String(card.innerText || '');
         const split = label ? text.indexOf(label) : -1;
         const name = card.querySelector('.info')?.querySelector('p')?.innerText;
-        add(buttons[0], name || (split >= 0 ? text.slice(0, split) : ''), 'lesson');
+        add(button, name || (split >= 0 ? text.slice(0, split) : ''), 'lesson', false, sourceId);
       }
       content = entries.map(entry => entry.item.title).join('\n');
       bookState = { visibleLessons: entries.length,
@@ -138,8 +180,7 @@
 
       const filters = document.querySelectorAll('input[type="search"],input[placeholder*="Поиск"],input[placeholder*="поиск"],input[placeholder*="Найти"],input[placeholder*="найти"],input[placeholder*="назван"],input[placeholder*="Search"],input[placeholder*="search"]');
       if ([...filters].some(element => visible(element) && normalize(element.value))) {
-        warnings.push('В книге включён поиск. Очистите фильтр перед автоматическим обходом.');
-        blocked = true;
+        block('search_active', 'В книге включён поиск. Очистите фильтр перед автоматическим обходом.');
       }
     } else {
       const main = document.querySelector('.lesson-viewer-layout_main');
@@ -164,7 +205,7 @@
         // ProgressMe renders its synthetic IsAddSection action as an ordinary
         // regular item, with a Plus icon. It opens an editor, not a section.
         if (section.classList.contains('separator') || section.querySelector('.iconedv-Plus')) continue;
-        add(section, section.innerText, 'section', route.sectionId !== 'for-homework' && section.classList.contains('current'));
+        add(section, section.innerText, 'section', route.sectionId !== 'for-homework' && section.classList.contains('current'), sectionIdentity(section, route));
       }
       for (const homework of limited('.lesson-viewer-section-right_additional')) {
         // Source icon fonts expose private-use glyphs alongside the text label.
@@ -178,20 +219,25 @@
     const pagination = navigationRoots.flatMap(root => [...root.querySelectorAll('[class*="pagination"],[class*="Pagination"],[aria-label*="pagination"],[aria-label*="Pagination"],[infinite-scroll],[class*="infinite-scroll"],[class*="infiniteScroll"]')]);
     const loadMore = navigationRoots.some(root => [...root.querySelectorAll('button')].some(element => visible(element) && /^(?:показать|загрузить)\s+ещ[её]$|^load more$/i.test(normalize(element.innerText))));
     if (pagination.some(visible) || loadMore) {
-      warnings.push('Обнаружена пагинация или подгрузка элементов. Автоматический обход этой страницы остановлен.');
-      blocked = true;
+      block('pagination', 'Обнаружена пагинация или подгрузка элементов. Автоматический обход этой страницы остановлен.');
     }
     if (entries.length > MAX_ITEMS) {
-      warnings.push(`Найдено больше ${MAX_ITEMS} элементов навигации. Автоматический обход этой страницы остановлен.`);
-      blocked = true;
+      block('item_limit', `Найдено больше ${MAX_ITEMS} элементов навигации. Автоматический обход этой страницы остановлен.`);
     }
     const keys = new Set();
     for (const entry of entries) {
-      if (keys.has(entry.item.key)) { warnings.push('Несколько элементов навигации ссылаются на один исходный идентификатор. Проверьте список материала.'); blocked = true; }
+      if (keys.has(entry.item.key)) {
+        block('duplicate_item', 'Несколько элементов навигации ссылаются на один исходный идентификатор. Проверьте список материала.');
+      }
       keys.add(entry.item.key);
     }
 
-    return { result: { url: route.url, kind: route.kind, materialId: route.materialId, lessonId: route.lessonId, title, items: entries.slice(0, MAX_ITEMS).map(entry => entry.item), ready: ready && !blocked, blocked, readinessReason, ...(exerciseState ? { exerciseState } : {}), ...(bookState ? { bookState } : {}), contentSignature: signature(content), warnings: [...new Set(warnings)] }, entries, titleCounts };
+    const blocked = Boolean(blockedReasonCode);
+    return { result: { url: route.url, kind: route.kind, materialId: route.materialId, lessonId: route.lessonId, title,
+      items: entries.slice(0, MAX_ITEMS).map(entry => entry.item), ready: ready && !blocked, blocked,
+      ...(blocked ? { blockedReasonCode } : {}), readinessReason, ...(exerciseState ? { exerciseState } : {}),
+      ...(lessonButton && ['lesson_button', 'invalid_item'].includes(blockedReasonCode) ? { lessonButton } : {}),
+      ...(bookState ? { bookState } : {}), contentSignature: signature(content), warnings }, entries, titleCounts };
   }
 
   function observe(scanned) {
@@ -221,7 +267,7 @@
     const current = routeFor(location.href), expected = routeFor(request?.expectedUrl);
     if (!current || current.kind !== 'book' || expected?.url !== current.url) return { ok: false, error: 'Содержание учебника изменилось до раскрытия разделов.' };
     const before = scan().result;
-    if (before.blocked) return { ok: false, error: before.warnings.at(-1) };
+    if (before.blocked) return blockedReply(before);
     const groups = [...document.querySelectorAll('.section_accordion_li-inner')].filter(group => visible(group) && group.closest('.section_accordion_list'));
     if (groups.length > MAX_ITEMS) return { ok: false, error: 'Список разделов превышает размер поддерживаемого архива.' };
     let opened = 0;
@@ -241,6 +287,7 @@
       if (!expected || !current || expected.url !== current.url) return { ok: false, error: 'Страница изменилась. Повторно прочитайте навигацию перед переходом.' };
       if (typeof request?.key !== 'string' || request.key.length > 10000) return { ok: false, error: 'Неизвестный элемент навигации.' };
       const { result, entries } = scan();
+      if (result.blocked) return blockedReply(result);
       if (!result.ready) return { ok: false, error: 'Страница ещё не готова к обходу либо содержит неподдерживаемую навигацию.' };
       const target = entries.find(entry => entry.item.key === request.key);
       if (!target) return { ok: false, code: 'navigation_stale', error: 'Элемент навигации изменился или больше не доступен.' };
@@ -251,6 +298,11 @@
       target.element.click();
       return { ok: true, key: target.item.key, kind: target.item.kind, title: target.item.title };
     } catch { return { ok: false, error: 'Не удалось безопасно открыть элемент навигации.' }; }
+  }
+
+  function blockedReply(navigation) {
+    return { ok: false, error: navigation.warnings.at(-1), code: 'navigation_blocked', blockedReasonCode: navigation.blockedReasonCode,
+      ...(navigation.lessonButton ? { lessonButton: navigation.lessonButton } : {}) };
   }
 
   globalThis.__thedesharNavigation = Object.freeze({ inspect, open, prepare, setBookInventory });

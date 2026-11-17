@@ -5,12 +5,15 @@ import vm from 'node:vm';
 import { appendCapture, appendSnapshot, createWorkspace } from '../src/lib/state.js';
 import { collectAssets } from '../src/ui/assets.js';
 import { assertExportFilesReady } from '../src/lib/export-readiness.js';
+import { createExportPackage } from '../src/lib/package.js';
 
 const hookSource = await readFile(new URL('../src/capture/hook.js', import.meta.url), 'utf8');
 const visitSource = await readFile(new URL('../src/capture/section-visit.js', import.meta.url), 'utf8');
 const contentSource = await readFile(new URL('../src/capture/content.js', import.meta.url), 'utf8');
 const baseUrl = 'https://platform.desharschool.ru/lesson-editor/book/1254486/lesson/20349346/section/100346962';
 const captureBytes = 8 * 1024 * 1024;
+const archiveCapture = event => JSON.parse(createExportPackage({ captures: [event] }).entries
+  .find(entry => entry.name === 'originals/responses/00001.json').data);
 let pendingWindowMessages = 0;
 const postTask = callback => {
   pendingWindowMessages++;
@@ -180,7 +183,7 @@ function responseFor(data, { url = 'https://platform.desharschool.ru/api/lessons
   };
 }
 
-test('capture starts inert, redacts credentials and preserves answer keys', async () => {
+test('capture starts inert, defers body cleanup until packaging and preserves answer keys', async () => {
   const env = makePage();
   vm.runInContext(hookSource, env.context);
   const socket = new env.page.WebSocket('wss://proxy.progressme.ru/websocket?token=socket-secret');
@@ -188,15 +191,15 @@ test('capture starts inert, redacts credentials and preserves answer keys', asyn
   socket.receive(JSON.stringify(payload)); await tick();
   assert.equal(env.exports().length, 0);
   await env.command(true);
-  assert.equal(env.exports().length, 1, 'sanitized bootstrap response is released only after capture is enabled');
+  assert.equal(env.exports().length, 1, 'bootstrap response is released only after capture is enabled');
   socket.receive(JSON.stringify(payload)); await tick();
   const [record] = env.exports();
   assert.equal(record.url, 'wss://proxy.progressme.ru/websocket');
   assert.equal(record.data.lesson.exercises[0].answer_key.correct, 'town');
-  assert.equal(record.data.accessToken, undefined);
-  assert.equal(record.data.sessionId, undefined);
-  assert.equal(record.data.profile.email, undefined);
-  assert.ok(!JSON.stringify(record).includes('embedded-secret'));
+  assert.equal(record.data.accessToken, 'secret');
+  assert.equal(record.data.sessionId, 'secret');
+  assert.equal(record.data.profile.email, 'private@example.com');
+  assert.doesNotMatch(JSON.stringify(archiveCapture(record)), /embedded-secret|private@example.com|"secret"/);
   assert.ok(record.data.lesson.exercises[0].content.includes('size=2'));
   assert.ok(socket instanceof env.page.WebSocket);
   assert.equal(env.page.WebSocket.OPEN, 1);
@@ -208,14 +211,14 @@ test('capture starts inert, redacts credentials and preserves answer keys', asyn
   await tick();
 });
 
-test('account payloads, unrelated hosts, large frames and SPA non-material pages are excluded', async () => {
+test('account payloads, unrelated data, large frames and SPA non-material pages are excluded', async () => {
   const env = makePage();
   vm.runInContext(hookSource, env.context);
   await env.command(true);
   const privateSocket = new env.page.WebSocket('wss://proxy.progressme.ru/students');
   privateSocket.receive(JSON.stringify({ lessons: [{ id: 1 }] })); await tick();
   const foreignSocket = new env.page.WebSocket('wss://tracker.example/events');
-  foreignSocket.receive(JSON.stringify({ lesson: { id: 1 } })); await tick();
+  foreignSocket.receive(JSON.stringify({ profile: { name: 'Private' } })); await tick();
   const socket = new env.page.WebSocket('wss://proxy.progressme.ru/websocket');
   socket.receive(JSON.stringify({ profile: { name: 'Private' } })); await tick();
   socket.receive(JSON.stringify({ users: [{ lesson: { id: 1 } }] })); await tick();
@@ -259,7 +262,7 @@ test('confirmed exercise response envelopes pass MAIN, ISOLATED and storage with
     assert.equal(saved.data.Value.Items[1].Test.Questions[0].QuestionAnswers[0], 'true');
     assert.equal(saved.data.Value.Items[0].JsonData, '{"instruction":"Read first"}');
     assert.equal(saved.data.Value.Count, 2);
-    assert.doesNotMatch(JSON.stringify(saved), /unrelated-|learner-response|private-|Pupil|AnswerVersion1|AnswersTeacher|Statistics|Grades|SaveAnswerHistoriesRequest/);
+    assert.doesNotMatch(JSON.stringify(archiveCapture(saved)), /unrelated-|learner-response|private-|Pupil|AnswerVersion1|AnswersTeacher|Statistics|Grades|SaveAnswerHistoriesRequest/);
   }
   for (const Method of ['GetLessonWithId', 'GetLessonPreview']) {
     socket.receive(JSON.stringify({ Class: 'LessonWsController', Method, IsSuccess: true, ProjectName: 'Books', Value: { Sections: [{ Id: 23 }], HomeworkSection: { Id: 24 }, Book: { Id: 1 } } })); await tick();
@@ -290,12 +293,12 @@ test('ISOLATED bridge independently projects page-supplied RPC definitions and r
   assert.equal(captures.length, 1);
   assert.equal(captures[0].event.data.Value.Items[0].Text, '<p>Read this.</p>');
   assert.equal(JSON.parse(captures[0].event.data.Value.Items[0].JsonData).correctAnswers[0], 'cat');
-  assert.equal(new URL(JSON.parse(captures[0].event.data.Value.Items[0].ImagesJson)[0].url).pathname, '/files/b.png');
-  assert.doesNotMatch(JSON.stringify(captures), /private-|Pupil/);
+  assert.equal(new URL(JSON.parse(captures[0].event.data.Value.Items[0].ImagesJson)[0].url, baseUrl).pathname, '/files/b.png');
+  assert.doesNotMatch(JSON.stringify(captures.map(message => archiveCapture(message.event))), /private-|Pupil/);
   await post([response, { Class: 'UserWsController', Method: 'GetAccount', IsSuccess: true, Value: { Lessons: [], Name: 'private-person' } }]);
   const mixed = env.runtimeMessages.filter(message => message.type === 'CAPTURE_EVENT').at(-1);
   assert.equal(mixed.event.data[0].Value.Items[0].Id, 1);
-  assert.doesNotMatch(JSON.stringify(mixed), /private-|UserWsController|GetAccount/);
+  assert.doesNotMatch(JSON.stringify(archiveCapture(mixed.event)), /private-|UserWsController|GetAccount/);
 });
 
 test('serialized definition JSON keeps its string type and author answers across MAIN, ISOLATED and persistence', async () => {
@@ -318,13 +321,13 @@ test('serialized definition JSON keeps its string type and author answers across
   const bridged = env.runtimeMessages.find(message => message.type === 'CAPTURE_EVENT')?.event;
   assert.ok(main && bridged);
   const persisted = appendCapture(createWorkspace(7), { ...bridged, pageUrl: baseUrl }).captures[0];
-  for (const event of [main, bridged, persisted]) {
+  for (const event of [main, bridged, persisted].map(archiveCapture)) {
     const items = event.data.Value.Items;
     assert.equal(typeof items[0].JsonData, 'string');
     assert.equal(typeof items[0].ImagesJson, 'string');
     const json = JSON.parse(items[0].JsonData);
-    assert.equal(new URL(json.imageUrl).pathname, '/files/a.png');
-    assert.equal(new URL(json.imageUrl).search, '?width=200');
+    assert.equal(new URL(json.imageUrl, baseUrl).pathname, '/files/a.png');
+    assert.equal(new URL(json.imageUrl, baseUrl).search, '?width=200');
     assert.equal(json.Questions[0].QuestionAnswers[0], 'true');
     assert.equal(json.Questions[0].Answers[1], 'dog');
     assert.equal(JSON.parse(items[0].ImagesJson)[0].title, 'A cat');
@@ -407,16 +410,19 @@ test('content restores tab capture, revalidates bridged events and stops on SPA 
   await tick();
   const captures = () => env.runtimeMessages.filter(message => message.type === 'CAPTURE_EVENT');
   assert.equal(captures().length, 1);
-  assert.equal(captures()[0].event.data.accessToken, undefined);
+  assert.equal(captures()[0].event.data.accessToken, 'secret');
+  assert.doesNotMatch(JSON.stringify(archiveCapture(captures()[0].event)), /"secret"/);
   assert.equal(captures()[0].event.data.lesson.answer_key.correct, 2);
   assert.ok(!captures()[0].event.url.includes('token'));
   await post({ students: [{ lessons: [] }] });
   await post({ lesson: { id: 1 } }, 'https://platform.desharschool.ru/api/users');
-  await post({ lesson: { id: 1 } }, 'https://evil.example/lessons');
   assert.equal(captures().length, 1);
+  await post({ lesson: { id: 1 } }, 'https://other-school.example/lessons');
+  assert.equal(captures().length, 2, 'authored content no longer requires a provider domain');
+  assert.equal(captures()[1].event.url, 'https://other-school.example/lessons');
   env.page.location.pathname = '/cabinet/school/payments';
   await post({ lesson: { id: 1 } });
-  assert.equal(captures().length, 1);
+  assert.equal(captures().length, 2);
 });
 
 test('snapshot returns observed route IDs, reports limits and rejects non-material pages', async () => {
@@ -647,7 +653,7 @@ test('lesson media stays within exercises and excludes visible constructor or AI
   assert.doesNotMatch(JSON.stringify(response.snapshot), /visible-editor-ui|robotEmoji|helper-audio|Generate an exercise/);
 });
 
-test('authored scoring traverses MAIN, independent ISOLATED validation and storage without learner results', async () => {
+test('authored scoring traverses capture and is cleaned when packaging without losing author rules', async () => {
   const env = makePage({ readyEnabled: true });
   vm.runInContext(hookSource, env.context);
   vm.runInContext(contentSource, env.context);
@@ -671,7 +677,7 @@ test('authored scoring traverses MAIN, independent ISOLATED validation and stora
   const persisted = appendCapture(createWorkspace(7), { ...bridged, pageUrl: baseUrl }).captures[0];
   const expected = { TotalPoints: 3, TotalCountAnswers: 2, MaxPoints: 6,
     TestAnswers: [{ AnswerId: 11, Points: 3 }], Points: [{ CountAnswersFalse: 0, Point: 6 }] };
-  for (const event of [main, bridged, persisted]) {
+  for (const event of [main, bridged, persisted].map(archiveCapture)) {
     const item = event.data.Value.Items[0];
     for (const stats of [item.Statistics, JSON.parse(item.JsonData).Statistics]) {
       assert.deepEqual(Object.keys(stats).sort(), ['ConfigurationJson', 'ScoringType']);
@@ -690,8 +696,8 @@ test('authored scoring traverses MAIN, independent ISOLATED validation and stora
     event: { kind: 'websocket', url: 'wss://proxy.progressme.ru/websocket', data: response } }); await tick();
   const independent = isolated.runtimeMessages.find(message => message.type === 'CAPTURE_EVENT')?.event;
   assert.ok(independent);
-  assert.deepEqual(JSON.parse(independent.data.Value.Items[0].Statistics.ConfigurationJson), expected);
-  assert.doesNotMatch(JSON.stringify(independent), /private-|Pupil|ActualPoints|IsTrueAnswer|Grades/);
+  assert.deepEqual(JSON.parse(archiveCapture(independent).data.Value.Items[0].Statistics.ConfigurationJson), expected);
+  assert.doesNotMatch(JSON.stringify(archiveCapture(independent)), /private-|Pupil|ActualPoints|IsTrueAnswer|Grades/);
   assert.ok(Statistics.ConfigurationJson.includes('private-attempt'), 'live source config must remain untouched');
 });
 
@@ -712,7 +718,7 @@ test('null and blank scoring defaults remain inactive across every capture layer
   const bridged = env.runtimeMessages.find(message => message.type === 'CAPTURE_EVENT')?.event;
   assert.ok(main && bridged);
   const persisted = appendCapture(createWorkspace(7), { ...bridged, pageUrl: baseUrl }).captures[0];
-  for (const event of [main, bridged, persisted]) {
+  for (const event of [main, bridged, persisted].map(archiveCapture)) {
     event.data.Value.Items.forEach((item, index) => {
       for (const stats of [item.Statistics, JSON.parse(item.JsonData).Statistics]) {
         assert.equal(stats.ScoringType, 0);
@@ -1011,7 +1017,7 @@ function deferredRestore() {
 const capturesOf = env => env.runtimeMessages.filter(message => message.type === 'CAPTURE_EVENT');
 const issuesOf = env => env.runtimeMessages.filter(message => message.type === 'CAPTURE_ISSUE').map(message => message.code);
 
-test('absolute HTML URL entities cannot hide signed query secrets across any capture boundary', async () => {
+test('HTML URL entities retain source data until signed query secrets are removed when packaging', async () => {
   const env = makePage({ readyEnabled: true });
   vm.runInContext(hookSource, env.context);
   vm.runInContext(contentSource, env.context);
@@ -1023,15 +1029,19 @@ test('absolute HTML URL entities cannot hide signed query secrets across any cap
   socket.receive(JSON.stringify(response)); await tick();
   const bridged = capturesOf(env)[0].event;
   const saved = appendCapture(createWorkspace(7), { ...bridged, pageUrl: baseUrl }).captures[0];
-  for (const event of [env.exports()[0], bridged, saved]) assert.equal(event.data.Value.Items[0].Text.Text, expected);
-  // A page may bypass MAIN; the isolated boundary must sanitize independently.
+  for (const event of [env.exports()[0], bridged, saved]) {
+    assert.equal(event.data.Value.Items[0].Text.Text, html);
+    assert.equal(archiveCapture(event).data.Value.Items[0].Text.Text, expected);
+  }
+  // Packaging also cleans data from page messages that bypassed MAIN.
   const isolated = makePage({ readyEnabled: true });
   vm.runInContext(contentSource, isolated.context);
   await tick();
   const channel = isolated.posts.find(message => message.type === 'CAPTURE_STATE').channel;
   isolated.page.postMessage({ source: 'thedeshar-exporter-v1', direction: 'event', revision: 0, channel,
     event: { kind: 'websocket', url: 'wss://proxy.progressme.ru/websocket', data: response } }); await tick();
-  assert.equal(capturesOf(isolated)[0].event.data.Value.Items[0].Text.Text, expected);
+  assert.equal(capturesOf(isolated)[0].event.data.Value.Items[0].Text.Text, html);
+  assert.equal(archiveCapture(capturesOf(isolated)[0].event).data.Value.Items[0].Text.Text, expected);
   assert.equal(response.Value.Items[0].Text.Text, html, 'source author data remains untouched');
 });
 
@@ -1074,7 +1084,8 @@ test('early authored replies wait for the restored opt-in state and then drain o
   await tick();
   assert.equal(capturesOf(env).length, 1);
   assert.equal(capturesOf(env)[0].event.data.Value.Items[0].Text.Text, 'Initial author text');
-  assert.doesNotMatch(JSON.stringify(capturesOf(env)), /private-bootstrap-token/);
+  assert.equal(capturesOf(env)[0].event.data.Value.Items[0].Text.accessToken, 'private-bootstrap-token');
+  assert.doesNotMatch(JSON.stringify(archiveCapture(capturesOf(env)[0].event)), /private-bootstrap-token/);
   env.runtimeRequest({ type: 'CAPTURE_STOP' });
   env.socket.receive(JSON.stringify(textResponse('Off-period author text'))); await tick();
   env.runtimeRequest({ type: 'CAPTURE_START' }); await tick();
@@ -1208,6 +1219,116 @@ test('asynchronous blob and fetch reads cannot replay responses across a disable
     assert.equal(capturesOf(env).length, 0, transport);
     assert.deepEqual(issuesOf(env), []);
   }
+});
+
+test('a streamed response can finish across an observed first-section landing only with matching author identity', async () => {
+  const firstSection = new URL(baseUrl).pathname;
+  const lessonEntry = firstSection.replace(/\/\d+$/, '');
+  const response = textResponse('Author text for the first section');
+  response.Value.SectionId = 100346962;
+  const metadata = { Class: 'LessonWsController', Method: 'GetLessonWithId', IsSuccess: true,
+    Value: { Id: 20349346, Book: { Id: 1254486 }, Sections: [{ Id: 100346962 }] } };
+  const cases = [
+    { name: 'matching exercises', data: response, captures: 1 },
+    { name: 'matching metadata', data: metadata, captures: 1 },
+    { name: 'service JSON', data: { status: 'ok', color: 'blue' }, captures: 0 },
+    { name: 'other section', data: { ...response, Value: { ...response.Value, SectionId: 100346963 } }, loss: true },
+    { name: 'conflicting exercise section', data: { ...response, Value: { ...response.Value,
+      Items: [{ ...response.Value.Items[0], LessonSectionId: 100346963 }] } }, loss: true },
+    { name: 'missing section identity', data: textResponse('No section ID'), loss: true },
+    { name: 'other book metadata', data: { ...metadata, Value: { ...metadata.Value, Book: { Id: 1254487 } } }, loss: true },
+    { name: 'mixed routes', data: response, intermediate: '/lesson-editor/book/1254486/lesson/20349347/section', loss: true },
+    { name: 'unobserved route change', data: response, unobserved: true, loss: true },
+  ];
+  for (const { name, data, intermediate, unobserved, captures = 0, loss = false } of cases) {
+    const env = makePage({ readyEnabled: true, pathname: lessonEntry });
+    vm.runInContext(hookSource, env.context);
+    vm.runInContext(contentSource, env.context);
+    await tick();
+
+    const bytes = new TextEncoder().encode(JSON.stringify(data));
+    let finishRead;
+    let reads = 0;
+    env.page.nextResponse = {
+      url: 'https://platform.desharschool.ru/api/lessons/20349346',
+      headers: { get: key => key === 'content-type' ? 'application/json' : '0' },
+      clone: () => ({ body: { getReader: () => ({
+        async read() {
+          switch (++reads) {
+            case 1: return { value: bytes.subarray(0, 1), done: false };
+            case 2: return new Promise(resolve => { finishRead = () => resolve({ value: bytes.subarray(1), done: false }); });
+            default: return { done: true };
+          }
+        },
+        async cancel() {},
+      }) } }),
+    };
+    await env.page.fetch('/api/lessons/20349346');
+    await tick();
+    assert.equal(typeof finishRead, 'function', name);
+    assert.equal(capturesOf(env).length, 0, name);
+    if (intermediate) env.page.history.pushState({}, '', intermediate);
+    if (unobserved) env.page.location.pathname = firstSection;
+    else env.page.history.replaceState({}, '', firstSection);
+    finishRead();
+    await tick();
+
+    assert.equal(capturesOf(env).length, captures, name);
+    if (captures) assert.equal(capturesOf(env)[0].observedUrl, baseUrl, name);
+    assert.deepEqual(issuesOf(env), loss ? ['bootstrap_navigation_changed'] : [], name);
+    assert.equal(env.posts.filter(message => message.direction === 'activity').at(-1).pending, 0, name);
+  }
+});
+
+test('a non-material HTTP response arriving after navigation is ignored before classifying route loss', async () => {
+  for (const transport of ['fetch', 'xhr']) {
+    const env = makePage({ readyEnabled: true });
+    let finishResponse;
+    if (transport === 'fetch') env.page.fetch = () => new Promise(resolve => { finishResponse = resolve; });
+    vm.runInContext(hookSource, env.context);
+    vm.runInContext(contentSource, env.context);
+    await tick();
+
+    const payload = { status: 'ok' };
+    const url = 'https://platform.desharschool.ru/api/settings';
+    if (transport === 'fetch') void env.page.fetch(url);
+    else {
+      const xhr = new env.page.XMLHttpRequest();
+      xhr.open('GET', url);
+      xhr.send();
+      finishResponse = () => xhr.complete(url, JSON.stringify(payload));
+    }
+    env.page.history.replaceState({}, '', `${new URL(baseUrl).pathname}3`);
+    finishResponse(responseFor(payload, { url }));
+    await tick();
+    assert.equal(capturesOf(env).length, 0, transport);
+    assert.deepEqual(issuesOf(env), [], transport);
+  }
+});
+
+test('a completed bootstrap response queued for bridge delivery cannot confirm the concrete section', async () => {
+  const firstSection = new URL(baseUrl).pathname;
+  const env = makePage({ readyEnabled: true, pathname: firstSection.replace(/\/\d+$/, '') });
+  const post = env.page.postMessage;
+  const queued = [];
+  env.page.postMessage = message => {
+    if (message.direction === 'event') queued.push(message);
+    else post(message);
+  };
+  vm.runInContext(hookSource, env.context);
+  vm.runInContext(contentSource, env.context);
+  await tick();
+
+  const response = textResponse('Source response finished on the bootstrap URL');
+  response.Value.SectionId = 100346962;
+  env.page.nextResponse = responseFor(response);
+  await env.page.fetch('/api/lessons/20349346');
+  await tick();
+  assert.equal(queued.length, 1);
+  env.page.history.replaceState({}, '', firstSection);
+  post(queued[0]);
+  await tick();
+  assert.equal(capturesOf(env).length, 0);
 });
 
 test('a pending fetch overflow reports only for its own active capture and route', async () => {

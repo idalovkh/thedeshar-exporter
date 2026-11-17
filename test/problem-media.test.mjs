@@ -6,6 +6,7 @@ import { inspectRejectedMediaResponse } from '../src/lib/media-response-diagnost
 const sourcePage = 'https://progressme.ru/lesson-editor/book/71/lesson/5/section/6';
 const candidate = { id: 'asset-0001', name: 'picture.png', url: 'https://cdn.example.org/picture.png', sourcePage };
 const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 255]);
+const validPng = new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNoWHDiPwAGdALoLm59EwAAAABJRU5ErkJggg==', 'base64'));
 
 test('a truncated text/plain PNG reports its MIME and signature without becoming downloadable', async () => {
   const events = [];
@@ -101,7 +102,7 @@ test('media events distinguish retries from terminal failures and keep per-attem
       attempt++;
       if (attempt === 1) throw new TypeError('private network error');
       if (attempt === 2) return new Response('temporary', { status: 503, headers: { 'content-type': 'text/html', 'content-length': '9' } });
-      return new Response(png, { headers: { 'content-type': 'image/png', 'content-length': String(png.length) } });
+      return new Response(validPng, { headers: { 'content-type': 'image/png', 'content-length': String(validPng.length) } });
     }, onDiagnostic: event => events.push(event),
   });
   assert.equal(file.status, 'downloaded');
@@ -113,7 +114,7 @@ test('media events distinguish retries from terminal failures and keep per-attem
   assert.equal(events[3].httpStatus, 503);
   assert.equal(events.at(-1).httpStatus, 200);
   assert.equal(events.at(-1).mimeType, 'image/png');
-  assert.equal(events.at(-1).receivedBytes, png.length);
+  assert.equal(events.at(-1).receivedBytes, validPng.length);
   assert.doesNotMatch(JSON.stringify(events), /private network error/);
 });
 
@@ -146,10 +147,10 @@ test('permission, temporary URLs, timeout and cancellation have distinct termina
 test('diagnostic delivery errors cannot change accepted media or retry policy', async () => {
   for (const onDiagnostic of [() => { throw new Error('observer failed'); }, async () => { throw new Error('async observer failed'); }]) {
     const [file] = await downloadMediaAssets([candidate], {
-      fetchFile: async () => new Response(png, { headers: { 'content-type': 'image/png' } }), onDiagnostic,
+      fetchFile: async () => new Response(validPng, { headers: { 'content-type': 'image/png' } }), onDiagnostic,
     });
     assert.equal(file.status, 'downloaded');
-    assert.deepEqual(new Uint8Array(await file.data.arrayBuffer()), png);
+    assert.deepEqual(new Uint8Array(await file.data.arrayBuffer()), validPng);
   }
 });
 

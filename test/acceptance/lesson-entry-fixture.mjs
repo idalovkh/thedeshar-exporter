@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { crossingResponseScript, validateCrossingReads } from './lesson-entry-crossing-fixture.mjs';
 
 const fixtureOrigin = 'https://platform.desharschool.ru';
 const bookId = '1153358';
@@ -12,19 +13,22 @@ const sectionUrl = (lesson, section = '') => `${fixtureOrigin}/lesson-editor/boo
 // Replays the two history changes from the user's report, with two complete
 // lessons so the tour must also return to contents and open the next lesson.
 export function lessonEntryFixture(caseName) {
-  if (!['lesson-before', 'lesson-after', 'lesson-manual'].includes(caseName)) return null;
-  const timing = caseName === 'lesson-before' ? 'before' : 'after';
+  if (!['lesson-before', 'lesson-after', 'lesson-crossing', 'lesson-crossing-mismatch', 'lesson-manual'].includes(caseName)) return null;
+  const timing = caseName.startsWith('lesson-crossing') ? 'crossing' : caseName === 'lesson-before' ? 'before' : 'after';
   const manualSection = caseName === 'lesson-manual';
+  const mismatch = caseName === 'lesson-crossing-mismatch';
   return {
     fixtureOrigin, fixtureBook, fixtureSection: sectionUrl(lessons[0].id, lessons[0].sections[0]),
-    scenario: { name: `two-stage-lesson-entry-${manualSection ? 'manual-section-refusal' : `author-${timing}`}`,
+    scenario: { name: `two-stage-lesson-entry-${manualSection ? 'manual-section-refusal' : `author-${timing}${mismatch ? '-mismatch' : ''}`}`,
       lessonEntry: true, manualSection, lessonNavigation: 'staged' },
     finishTimeoutMs: timing === 'before' ? 170_000 : 25_000,
     fixtureHTML() {
       return String.raw`<!doctype html><meta charset="utf-8"><title>Two-stage lesson entry</title><main id="fixture"></main><script>
 const lessons = ${JSON.stringify(lessons)}, bookId = ${JSON.stringify(bookId)};
 const timing = ${JSON.stringify(timing)}, manual = ${JSON.stringify(manualSection)};
+const mismatch = ${JSON.stringify(mismatch)};
 const route = (lesson, section='') => '/lesson-editor/book/'+bookId+'/lesson/'+lesson+'/section'+(section?'/'+section:'');
+${timing === 'crossing' ? crossingResponseScript : ''}
 function log(action, lesson, section='') {
  const events=JSON.parse(sessionStorage.getItem('lesson-entry-events') || '[]');
  events.push({action,lesson,section,url:location.href});
@@ -49,14 +53,16 @@ function openLesson(lesson) {
  history.pushState({},'',route(lesson)); log('lesson-bootstrap',lesson);
  renderLesson(lesson);
  if(timing==='before') setTimeout(()=>author(lesson,first),60);
- setTimeout(()=>{
+ const land = ()=>{
   history.replaceState({},'',route(lesson,first)); log('lesson-concrete',lesson,first);
   renderLesson(lesson,first);
-  if(timing==='after') setTimeout(()=>author(lesson,first),manual?1500:80);
- },305);
+  if(timing==='after'||mismatch) setTimeout(()=>author(lesson,first),manual?1500:80);
+ };
+ if(timing==='crossing') crossingResponses(lesson,first,land);
+ else setTimeout(land,305);
 }
 globalThis.__lessonEntryManual=()=>openSection(lessons[0].id,lessons[0].sections[1]);
-const match=location.pathname.match(/\/lesson\/(\d+)\/section(?:\/(\d+))?\/?$/);
+const match=location.pathname.match(/\/lesson\/(\d+)(?:\/section(?:\/(\d+))?)?\/?$/);
 if(match) {
  const source=lessons.find(value=>value.id===match[1]);
  if(match[2]) {renderLesson(source.id,match[2]);setTimeout(()=>author(source.id,match[2]),80);}
@@ -71,14 +77,25 @@ if(match) {
     fixtureJSON(pathname) {
       if (pathname === '/books/qa/groups') return { Class: 'CourseWsController', Method: 'GetBookCourses', IsSuccess: true,
         ProjectName: 'Books', Value: [{ Id: 1, Name: 'Section 1', CountLesson: lessons.length }] };
-      const match = pathname.match(/^\/lessons\/qa\/author\/(\d+)\/(\d+)$/);
-      if (match && lessons.some(lesson => lesson.id === match[1] && lesson.sections.includes(match[2]))) return {
+      if (timing === 'crossing' && /^\/lessons\/qa\/crossing\/service\/\d+\/\d+$/.test(pathname)) return { status: 'ok' };
+      const match = pathname.match(/^\/lessons\/qa\/(crossing\/)?author\/(\d+)\/(\d+)$/);
+      const lesson = match && lessons.find(lesson => lesson.id === match[2] && lesson.sections.includes(match[3]));
+      if (lesson) return {
         Class: 'GetExerciseWsController', Method: 'LoadExercises', IsSuccess: true, ProjectName: 'Exercises',
-        Value: { SectionId: Number(match[2]), Items: [], Count: 0 },
+        Value: { SectionId: Number(mismatch && match[1] ? lesson.sections[1] : match[3]), Items: [], Count: 0 },
       };
       return null;
     },
     manualTarget: sectionUrl(lessons[0].id, lessons[0].sections[1]),
+    validateStopped: mismatch ? (result, scenario) => {
+      const firstLesson = lessons[0], first = sectionUrl(firstLesson.id, firstLesson.sections[0]);
+      validateCrossingReads(scenario.sourceEvents.filter(value => value.lesson === firstLesson.id), sectionUrl(firstLesson.id), first);
+      assert.equal(result.collection.diagnostics.failure.stage, 'save_page');
+      assert.equal(result.dropped, 1, 'Only the mismatched material response counts as lost');
+      assert.ok(result.captures.every(value => !value.url.includes('/crossing/')), 'Neither crossing response may be attached to the section');
+      assert.ok(result.captures.some(value => value.pageUrl === first && value.data?.Value?.SectionId === Number(firstLesson.sections[0])),
+        'A fresh matching response must reach the correct section before the loss stops collection');
+    } : null,
     validateFinished(result, scenario) {
       assert.equal(result.collection.items.filter(value => value.kind === 'lesson').length, lessons.length);
       assert.ok(result.collection.items.every(value => value.status === 'visited'));
@@ -96,15 +113,27 @@ if(match) {
         assert.equal(baseEvent.documentId, firstEvent.documentId, 'Bootstrap and first section must share a browser document');
         assert.ok(firstEvent.timeStamp - baseEvent.timeStamp >= 300, 'The reported 305 ms route delay was not replayed');
         const sourceEvents = scenario.sourceEvents.filter(value => value.lesson === lesson.id);
-        const responseIndex = sourceEvents.findIndex(value => value.action === 'author-response' && value.section === lesson.sections[0]);
         const concreteIndex = sourceEvents.findIndex(value => value.action === 'lesson-concrete');
-        assert.ok(responseIndex >= 0 && concreteIndex >= 0);
-        assert.equal(responseIndex < concreteIndex, timing === 'before', 'First author response timing did not match the selected scenario');
+        assert.ok(concreteIndex >= 0);
+        if (timing === 'crossing') {
+          validateCrossingReads(sourceEvents, bootstrap, first);
+          const replies = result.captures.filter(value => value.url.endsWith(`/crossing/author/${lesson.id}/${lesson.sections[0]}`));
+          assert.equal(replies.length, 1, 'The delayed author response must be retained exactly once');
+          assert.equal(replies[0].pageUrl, first);
+        } else {
+          const responseIndex = sourceEvents.findIndex(value => value.action === 'author-response' && value.section === lesson.sections[0]);
+          assert.ok(responseIndex >= 0);
+          assert.equal(responseIndex < concreteIndex, timing === 'before', 'First author response timing did not match the selected scenario');
+        }
         for (const section of lesson.sections) {
           assert.ok(result.snapshots.some(value => value.url === sectionUrl(lesson.id, section)), `Section ${section} was not saved`);
           assert.ok(result.captures.some(value => value.pageUrl === sectionUrl(lesson.id, section) && value.data?.Value?.Count === 0 && value.data?.Value?.SectionId === Number(section)), `Section ${section} lacks an author response confirmed on its actual page`);
         }
         assert.ok(!result.snapshots.some(value => value.url === bootstrap), 'An intermediate lesson route was saved as a ready section');
+      }
+      if (timing === 'crossing') {
+        assert.equal(result.dropped, 0, 'The service response must not count as a lost capture');
+        assert.ok(result.captures.every(value => !value.url.includes('/crossing/service/')), 'The service response must not enter the archive');
       }
     },
   };

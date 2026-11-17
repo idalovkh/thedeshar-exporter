@@ -17,6 +17,7 @@ export function createProblemReporter({ send, extensionVersion, browserVersion, 
     if (book?.rootUrl) book = { ...book, rootUrl: problemReportUrl(book.rootUrl).replace(/\/$/, '') };
     const key = `${workspaceId || tabId}:${book?.rootUrl || ''}`;
     if (current?.key === key) {
+      current.tabId = tabId;
       current.collectionDiagnostics = collectionDiagnostics;
       return;
     }

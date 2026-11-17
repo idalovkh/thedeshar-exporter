@@ -1,6 +1,7 @@
 import { navigationErrorCode, navigationErrorState } from './source-navigation-errors.js';
 import { hasNavigationAttempt } from './source-navigation-documents.js';
 import { navigationDiagnostic } from './navigation-diagnostics.js';
+import { isReplacementLoading } from './source-navigation-replacement-loading.js';
 
 const LOGIN_PATH = /(?:^|\/)(?:login|log-in|signin|sign-in|auth|oauth|authorization)(?:\/|$)/i;
 export function sourcePageKind(value, expectedBookKey, { canonicalUrl, bookKey }) {
@@ -33,6 +34,7 @@ export function classifySourceNavigation({ tab, frame, intent, expectedBookKey, 
   if (intent?.invalidState) return { ...common, state: intent.invalidState,
     ...(navigationErrorCode(intent.failure?.error) ? { networkError: navigationErrorCode(intent.failure.error) } : {}),
     ...(intent.invalidState === 'security_error' ? { reason: 'login_required' } : {}) };
+  if (isReplacementLoading({ tab, frame, intent, expectedBookKey, canonicalUrl, bookKey, now })) return { ...common, state: 'loading' };
   const state = sourcePageKind(currentUrl, expectedBookKey, { canonicalUrl, bookKey });
   if (state === 'other_book' || state === 'security_error' || state === 'source_changed') return { ...common, state,
     ...(state === 'security_error' ? { reason: 'login_required' } : {}) };

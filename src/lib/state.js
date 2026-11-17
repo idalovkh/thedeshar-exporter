@@ -1,4 +1,4 @@
-import { classifyMaterialPayload, redactSensitive, sanitizeUrl } from './security.js';
+import { classifyMaterialPayload, sanitizeUrl } from './security.js';
 import { isTrustedSourceOrigin } from './source-origins.js';
 
 // Keep each record small enough for a bounded Chrome runtime message. The
@@ -97,10 +97,10 @@ export function appendCapture(state, incoming) {
   if (bytesOf(incoming) > LIMITS.eventBytes) {
     return rejectIncoming(state, 'Один из ответов превышает 8 МБ и пропущен. Ранее собранные данные сохранены.');
   }
-  const event = redactSensitive({ kind: incoming.kind, url: sanitizeUrl(incoming.url),
+  const event = { kind: incoming.kind, url: sanitizeUrl(incoming.url),
     ...(incoming.pageUrl !== undefined ? { pageUrl: sanitizeUrl(incoming.pageUrl) } : {}),
-    receivedAt: incoming.receivedAt, data: incoming.data });
-  // Compare full sanitized data, rather than relying on a collision-prone hash.
+    receivedAt: incoming.receivedAt, data: incoming.data };
+  // Compare full source data, rather than relying on a collision-prone hash.
   const signature = signatureOf(event), hash = signatureHash(signature);
   const index = captureIndex(state.captures);
   if (index.hashes.get(hash)?.some(position => signatureOf(state.captures[position]) === signature)) return state;
@@ -120,7 +120,7 @@ export function appendSnapshot(state, incoming) {
   if (bytesOf(incoming) > LIMITS.eventBytes) {
     return rejectIncoming(state, 'Снимок превышает 8 МБ и пропущен. Ранее собранные данные сохранены. Откройте меньший раздел урока.');
   }
-  const snapshot = redactSensitive(incoming);
+  const snapshot = { ...incoming };
   snapshot.url = sanitizeUrl(incoming.url);
   const existing = state.snapshots.findIndex(page => page.url === snapshot.url);
   const snapshots = [...state.snapshots];

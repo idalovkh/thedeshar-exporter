@@ -16,7 +16,7 @@ assert.equal(manifest.action.default_title, 'exporter');
 assert.deepEqual(manifest.host_permissions, ['https://platform.desharschool.ru/*', 'https://progressme.ru/*']);
 for (const script of manifest.content_scripts) assert.deepEqual(script.matches, manifest.host_permissions);
 assert.deepEqual(manifest.content_scripts.find(script => script.world === 'ISOLATED').js,
-  ['src/capture/source-binding.js', 'src/capture/navigation.js', 'src/capture/section-visit.js', 'src/capture/content.js']);
+  ['src/capture/source-binding.js', 'src/capture/navigation.js', 'src/capture/section-visit.js', 'src/capture/confirmed-lesson.js', 'src/capture/content.js']);
 assert.ok(!manifest.permissions.includes('cookies'));
 assert.ok(!manifest.permissions.includes('debugger'));
 assert.equal(manifest.content_security_policy.extension_pages,

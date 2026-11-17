@@ -3,6 +3,9 @@ import { navigationErrorCode, navigationErrorState, sourceStatusError } from './
 import { classifySourceNavigation, sourcePageKind } from './source-navigation-status.js';
 import { classifyDocumentEvent, hasNavigationAttempt, previousNavigationDocument } from './source-navigation-documents.js';
 import { navigationDiagnostic } from './navigation-diagnostics.js';
+import { confirmedLessonInventory, confirmedLessonRoute } from './confirmed-lesson-route.js';
+import { observeSourceProgress } from './source-progress.js';
+import { createSourceStallRecovery } from './source-stall-recovery.js';
 
 const PREFIX = 'source-navigation:';
 const bindingFields = ['tabId', 'ownerTabId', 'workspaceId', 'collectionId', 'bookKey'];
@@ -15,6 +18,7 @@ const changed = () => failure('source_changed', 'Исходная вкладка
 export function createSourceNavigation({ chrome, canonicalUrl, bookKey, authorize, sendSource,
   now = () => Date.now(), randomUUID = () => crypto.randomUUID(), onChange = () => {} }) {
   const records = new Map(), pending = new Map(), revisions = new Map(), observedNavigation = new Map(), traces = new Map();
+  const confirmedInventories = new Map();
   let hydrated = false;
   const ready = chrome.storage.session.get(null).then(values => {
     for (const [key, value] of Object.entries(values || {})) {
@@ -198,7 +202,7 @@ export function createSourceNavigation({ chrome, canonicalUrl, bookKey, authoriz
     const previous = await load(binding.tabId);
     if (previous && sameBinding(previous, binding)) assertAttempt(previous);
     if (previous && sameBinding(previous, binding) && previous.command.type === command.type &&
-      previous.command.key === command.key && previous.command.url === command.url &&
+      previous.command.key === command.key && (command.type === 'OPEN_CONFIRMED_LESSON' || previous.command.url === command.url) &&
       previous.sourceDocumentToken === command.expectedDocumentToken && previous.sourceUrl === canonicalUrl(command.expectedUrl)) {
       if (now() >= previous.deadlineAt) throw failure('transition_timeout', 'Страница книги не загрузилась за три минуты. Проверьте соединение или VPN и повторите сбор.');
       if (previous.invalidState) throw sourceStatusError({ state: previous.invalidState, navigation: withNavigation(previous).navigation });
@@ -221,16 +225,28 @@ export function createSourceNavigation({ chrome, canonicalUrl, bookKey, authoriz
       throw sourceStatusError({ state: 'unavailable', navigation: navigationDiagnostic({ cause: 'unexpected_document',
         phase: 'armed', expectedUrl: canonicalUrl(command.expectedUrl), observedUrl: canonicalUrl(frame?.url), currentDocumentId: frame?.documentId }) });
     }
-    const item = navigation.items?.find(candidate => candidate.key === command.key);
+    const freshInventory = confirmedLessonInventory(navigation);
+    const retainedInventory = confirmedInventories.get(binding.tabId);
+    const inventory = freshInventory || (retainedInventory && sameBinding(retainedInventory, binding) ? retainedInventory.inventory : null);
+    const direct = command.type === 'OPEN_CONFIRMED_LESSON';
+    if (direct) {
+      const url = confirmedLessonRoute(inventory, { key: command.key });
+      if (!url || bookKey(url) !== binding.bookKey || command.url !== undefined && canonicalUrl(command.url) !== url) {
+        throw failure('source_lesson_unconfirmed', 'Для прямого перехода не подтверждён идентификатор урока. Откройте его через содержание книги.');
+      }
+      command = { ...command, url };
+    }
+    const item = direct ? inventory.items.find(candidate => candidate.key === command.key) : navigation.items?.find(candidate => candidate.key === command.key);
     const target = item && { kind: item.kind, ...(item.sourceId ? { sourceId: String(item.sourceId) } : {}),
       ...(navigation.lessonId ? { lessonId: String(navigation.lessonId) } : {}) };
     const intent = { version: 1, ...binding, id: randomUUID(), command: { ...command }, sourceUrl: canonicalUrl(navigation.url),
       sourceDocumentToken: navigation.documentToken, sourceBrowserDocumentId: frame.documentId,
-      attemptMode: command.type === 'NAVIGATE_SOURCE' ? 'document' : 'item',
+      attemptMode: command.type === 'NAVIGATE_SOURCE' || direct ? 'document' : 'item',
       attemptSourceUrl: canonicalUrl(frame.url), attemptSourceBrowserDocumentId: frame.documentId,
       previousBrowserDocumentIds: [frame.documentId],
-      target, targetUrl: command.type === 'NAVIGATE_SOURCE' ? canonicalUrl(command.url) : null,
-      deadlineAt: now() + TRANSITION_TIMEOUT_MS, attempt: 1, maxAttempts: MAX_TRANSITION_ATTEMPTS, phase: 'armed' };
+      target, targetUrl: command.type === 'NAVIGATE_SOURCE' || direct ? canonicalUrl(command.url) : null,
+      deadlineAt: now() + TRANSITION_TIMEOUT_MS, attempt: 1, maxAttempts: MAX_TRANSITION_ATTEMPTS, phase: 'armed',
+      progress: observeSourceProgress(null, null, now()) };
     await serial(binding.tabId, () => save(binding.tabId, intent));
     await checkRevision(binding.tabId, before, intent);
     const finalCheck = await authorize(intent);
@@ -244,6 +260,7 @@ export function createSourceNavigation({ chrome, canonicalUrl, bookKey, authoriz
     const latestState = classifySourceNavigation({ ...latestBrowser, expectedBookKey: binding.bookKey, canonicalUrl, bookKey, now: now() });
     if (latestState.state !== 'same_book') throw sourceStatusError(latestState);
     check(); finalCheck();
+    if (freshInventory) confirmedInventories.set(binding.tabId, { ...binding, inventory: freshInventory });
     const response = await sendSource(binding.tabId, command);
     if (response?.ok === false) await serial(binding.tabId, () => save(binding.tabId, null));
     return { ...response, transition: descriptor(intent) };
@@ -279,7 +296,8 @@ export function createSourceNavigation({ chrome, canonicalUrl, bookKey, authoriz
       if (!response?.ok || !response.navigation) throw failure('source_unavailable', 'Не удалось подтвердить текущую страницу книги перед повторной загрузкой.');
       const nav = response.navigation, url = canonicalUrl(nav.url);
       if (bookKey(url) !== intent.bookKey || browser.frame?.errorOccurred) throw changed();
-      if (!intent.observedUrl && url === intent.sourceUrl && nav.documentToken === intent.sourceDocumentToken && intent.command.type === 'OPEN_MATERIAL_ITEM') {
+      if (!intent.observedUrl && url === intent.sourceUrl && nav.documentToken === intent.sourceDocumentToken &&
+        ['OPEN_MATERIAL_ITEM', 'OPEN_CONFIRMED_LESSON'].includes(intent.command.type)) {
         command = { ...intent.command }; reloaded = false;
       } else {
         if (!targetMatches(intent, url) || intent.observedUrl && intent.observedUrl !== url) throw changed();
@@ -292,7 +310,7 @@ export function createSourceNavigation({ chrome, canonicalUrl, bookKey, authoriz
     if (!browser.frame?.documentId || !canonicalUrl(browser.frame.url)) throw sourceStatusError({ state: 'unavailable',
       navigation: navigationDiagnostic({ ...intent.navigation, cause: 'unexpected_document' }) });
     const next = { ...intent, attempt: intent.attempt + 1, phase: 'armed', lastFailure: intent.failure || intent.lastFailure,
-      attemptMode: native || command.type === 'NAVIGATE_SOURCE' ? 'document' : 'item',
+      attemptMode: native || ['NAVIGATE_SOURCE', 'OPEN_CONFIRMED_LESSON'].includes(command.type) ? 'document' : 'item',
       attemptSourceUrl: canonicalUrl(browser.frame.url), attemptSourceBrowserDocumentId: browser.frame.documentId,
       previousBrowserDocumentIds: [...new Set([...(intent.previousBrowserDocumentIds || []), intent.browserDocumentId, browser.frame.documentId].filter(Boolean))].slice(-8),
       failure: null, browserDocumentId: null };
@@ -318,7 +336,23 @@ export function createSourceNavigation({ chrome, canonicalUrl, bookKey, authoriz
     return { ...(native ? { ok: true } : response), transition: descriptor(next), reloaded,
       ...(previousDocumentToken ? { previousDocumentToken } : {}) };
   }
-  return { navigate, status, retry,
+  const stalled = createSourceStallRecovery({ chrome, now, canonicalUrl, bookKey, targetMatches,
+    boundIntent, checkBudget, browserState, save, serial, descriptor });
+  return { navigate, status, retry, recoverStalled: stalled.reload, recoveryIntent: stalled.inspect,
+    async installReplacement(intent, tabId, documentId) {
+      await drain(tabId);
+      const existing = await load(tabId);
+      if (existing?.id === intent.id && existing.attempt === 3) {
+        const check = await authorize(existing); check();
+        if (existing.invalidState) throw sourceStatusError({ state: existing.invalidState });
+        return { ok: true, transition: descriptor(existing), reloaded: true, recovery: 'replace', previousDocumentToken: intent.sourceDocumentToken };
+      }
+      const next = { ...intent, tabId, attempt: 3, phase: 'armed', observedUrl: null, failure: null, browserDocumentId: null,
+        attemptMode: 'document', attemptSourceUrl: intent.recoveryUrl, attemptSourceBrowserDocumentId: documentId,
+        previousBrowserDocumentIds: [documentId], progress: observeSourceProgress(null, null, now()), recovery: 'replace' };
+      await save(tabId, next);
+      return { ok: true, transition: descriptor(next), reloaded: true, recovery: 'replace', previousDocumentToken: intent.sourceDocumentToken };
+    },
     async complete(tabId, value) {
       await ready;
       await serial(tabId, async () => {
@@ -334,13 +368,23 @@ export function createSourceNavigation({ chrome, canonicalUrl, bookKey, authoriz
       if (intent.invalidState) throw sourceStatusError({ state: intent.invalidState, navigation: withNavigation(intent).navigation });
       return descriptor(intent);
     },
-    remember(tabId, navigation) {
-      if (navigation && canonicalUrl(navigation.url) && typeof navigation.documentToken === 'string') observedNavigation.set(tabId, navigation);
+    async remember(tabId, navigation) {
+      if (!navigation || !canonicalUrl(navigation.url) || typeof navigation.documentToken !== 'string') return;
+      observedNavigation.set(tabId, navigation);
+      await ready;
+      await serial(tabId, async () => {
+        const intent = await load(tabId);
+        if (!intent || intent.invalidState || !targetMatches(intent, navigation.url)) return;
+        if (intent.attemptMode === 'document' && intent.phase !== 'committed' &&
+          navigation.documentToken === (intent.recoverySourceDocumentToken || intent.sourceDocumentToken)) return;
+        const progress = observeSourceProgress(intent.progress, navigation, now());
+        if (progress.sequence !== intent.progress?.sequence) await save(tabId, { ...intent, progress });
+      });
     },
     async clear(tabId) {
       await ready;
-      if (!records.has(tabId) && !observedNavigation.has(tabId)) return;
-      bump(tabId); observedNavigation.delete(tabId); traces.delete(tabId);
+      if (!records.has(tabId) && !observedNavigation.has(tabId) && !confirmedInventories.has(tabId)) return;
+      bump(tabId); observedNavigation.delete(tabId); traces.delete(tabId); confirmedInventories.delete(tabId);
       if (records.has(tabId)) await serial(tabId, () => save(tabId, null));
     } };
 }

@@ -21,13 +21,12 @@ import { diagnosticPageUrl } from '../src/lib/collection-diagnostics.js';
 import { navigationErrorCode } from '../src/lib/source-navigation-errors.js';
 import { navigationDiagnostic } from '../src/lib/navigation-diagnostics.js';
 import { exporterBindingDiagnostic } from '../src/lib/exporter-binding-diagnostics.js';
+import { createSourceReplacement } from '../src/ui/source-replacement.js';
 
 // Execute the shipping dashboard code. Only the browser/extension boundary is
 // faked, so these tests exercise its listeners, rendered state and async guards.
 const dashboardSource = (await readFile(new URL('../src/ui/exporter.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const problemReportSource = (await readFile(new URL('../src/ui/problem-report.js', import.meta.url), 'utf8'))
-  .replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
-const consentSource = (await readFile(new URL('../src/ui/partial-export-consent.js', import.meta.url), 'utf8'))
   .replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
 const dashboardHtml = await readFile(new URL('../exporter.html', import.meta.url), 'utf8');
 const bookUrl = id => `https://progressme.ru/cabinet/school/materials/book/${id}/content`;
@@ -56,7 +55,6 @@ class Element {
   removeAttribute(name) { this.attributes.delete(name); }
   hasAttribute(name) { return this.attributes.has(name); }
   toggleAttribute(name, force) { if (force ?? !this.hasAttribute(name)) this.setAttribute(name, ''); else this.removeAttribute(name); }
-  // These guard scenarios decline consent; dedicated modal tests cover approval.
   showModal() { this.open = true; this.modalCount++; queueMicrotask(() => this.close()); }
   close() { this.open = false; for (const callback of [...(this.listeners.get('close') || [])]) callback(); }
   focus() {}
@@ -153,7 +151,7 @@ async function dashboard({ state = failedWorkspace(), selectedTabId = 7, workspa
     chrome, location, history: { replaceState(_state, _unused, url) { location.href = String(url); } },
     confirm(message) { confirmations.push(message); return confirm; },
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; }, clearTimeout(id) { timers.delete(id); },
-    URL, Intl, AbortController, DOMException, structuredClone, Blob, crypto: globalThis.crypto,
+    URL, Intl, AbortController, DOMException, structuredClone, Blob, crypto: globalThis.crypto, createSourceReplacement,
     showSaveFilePicker: memorySavePicker(downloads), createExportSpool: async () => memoryExportSpool(), prepareDiskExport, writeZipFile, createExportResources,
     appendProblemEvent, createProblemReport, legacyProblemReport, problemReportForDownload, problemReportUrl, projectProblemEvent,
     getView, isSourceUrl, buildCoverage, exportReadiness, assertExportReady, assertExportFilesReady, exportFileProblems, collectAssets, mediaOrigins, collectBook, archiveFilename: makeFilename, assertAssetCapacity, downloadExportMedia: downloadFiles, MAX_ARCHIVE_BYTES, replacePackageAssets,
@@ -162,7 +160,6 @@ async function dashboard({ state = failedWorkspace(), selectedTabId = 7, workspa
     buildZipBlob: allowDownload ? buildZipBlob : () => { throw new Error('An aborted download must not assemble an archive'); },
   });
   vm.runInContext(problemReportSource, context, { filename: 'problem-report.js' });
-  vm.runInContext(consentSource, context, { filename: 'partial-export-consent.js' });
   vm.runInContext(dashboardSource, context, { filename: 'exporter.js' });
   await settle();
   return {
@@ -196,6 +193,54 @@ test('the page has only collection, download, cancellation and error report cont
   }
   assert.equal(app.elements['collect-book'].hidden, false);
   assert.equal(app.elements['download-diagnostics'].hidden, true);
+});
+
+test('a blocked book shows its reason and offers a report before collection starts', async () => {
+  let blocked = true;
+  const app = await dashboard({ state: createWorkspace(7), onRequest(message) {
+    if (message.type === 'GET_NAVIGATION') return { ok: true, navigation: {
+      kind: 'book', url: bookUrl(71), title: 'Old textbook', blocked, blockedReasonCode: blocked ? 'search_active' : undefined,
+    } };
+  } });
+
+  assert.equal(app.elements['collection-title'].textContent, 'Сбор книги заблокирован');
+  assert.match(app.elements['collection-status'].textContent, /Очистите фильтр/);
+  assert.equal(app.elements['collect-book'].disabled, true);
+  assert.equal(app.elements['download-diagnostics'].hidden, false);
+  await app.refresh();
+  await app.elements['download-diagnostics'].click();
+  const reportUrl = app.downloads[0].href;
+  try {
+    const report = await (await fetch(reportUrl)).json();
+    const failures = report.events.filter(event => event.reason === 'navigation_blocked');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].stage, 'book');
+    assert.equal(failures[0].blockedReasonCode, 'search_active');
+  } finally {
+    URL.revokeObjectURL(reportUrl);
+  }
+
+  blocked = false;
+  await app.refresh();
+  assert.equal(app.elements['collection-title'].textContent, 'Книга готова к сбору');
+  assert.equal(app.elements['collect-book'].disabled, false);
+});
+
+test('a lesson button blocker includes the card position and candidate counts in its report', async () => {
+  const lessonButton = { cardIndex: 6, desktopVisible: 0, mobileVisible: 1, cause: 'icon' };
+  const app = await dashboard({ state: createWorkspace(7), onRequest(message) {
+    if (message.type === 'GET_NAVIGATION') return { ok: true, navigation: {
+      kind: 'book', url: bookUrl(71), title: 'Old textbook', blocked: true, blockedReasonCode: 'lesson_button', lessonButton,
+    } };
+  } });
+  await app.elements['download-diagnostics'].click();
+  const reportUrl = app.downloads[0].href;
+  try {
+    const report = await (await fetch(reportUrl)).json();
+    assert.deepEqual(report.events.at(-1).lessonButton, lessonButton);
+  } finally {
+    URL.revokeObjectURL(reportUrl);
+  }
 });
 
 test('closing the source explains restarting from the book without losing its title or retained data', async () => {
@@ -427,7 +472,7 @@ test('media capacity is refused before requesting host permissions or preparing 
   assert.equal(app.records.get(7).snapshots[0].assets.length, MAX_ASSETS + 1);
 });
 
-test('denied media permission cannot save an archive without files and preserves the book', async () => {
+test('denied media permission allows choosing a ZIP on the next click without another prompt', async () => {
   const state = finishedWorkspace();
   state.snapshots[0].assets = ['https://cdn.example.org/picture.png'];
   const app = await dashboard({ state, allowDownload: true, permission: Promise.resolve(false) });
@@ -440,9 +485,12 @@ test('denied media permission cannot save an archive without files and preserves
   assert.match(app.elements.message.textContent, /не разрешил.*файл|разрешите доступ/i);
   assert.doesNotMatch(app.elements.message.textContent, /сохраните архив без файлов/i);
   assert.deepEqual(app.records.get(7), retained);
-  assert.equal(app.elements.export.disabled, false, 'Permission can be requested again');
+  assert.equal(app.elements.export.disabled, false, 'ZIP can be selected after denial');
   assert.equal(app.elements['collect-book'].disabled, false);
   assert.equal(app.elements.cancel.hidden, true);
+  await app.elements.export.click(); await settle();
+  assert.equal(app.permissionRequests.length, 1);
+  assert.equal(app.downloads.length, 1);
 });
 
 test('a failed archive preparation releases busy controls and allows a successful retry', async () => {
@@ -546,7 +594,7 @@ test('an unreachable extension worker shows Russian recovery instructions instea
   assert.equal(app.elements['reset-book'], undefined);
 });
 
-test('a failed file from paged raw definitions requires consent before an archive is saved', async () => {
+test('a failed file from paged raw definitions automatically saves an archive with warnings', async () => {
   const state = finishedWorkspace();
   state.dropped = 0; state.warnings = []; state.exportRevision = 42;
   const rawCapture = { kind: 'fetch', url: 'https://progressme.ru/api/materials/71', data: {
@@ -572,10 +620,10 @@ test('a failed file from paged raw definitions requires consent before an archiv
   assert.ok(app.requests.filter(item => item.type === 'GET_STATE').every(item => item.summary === true));
   await app.elements.export.click();
   await settle(); await app.refresh();
-  assert.equal(app.downloads.length, 0);
-  assert.match(app.elements.message.textContent, /отменено/i);
+  assert.equal(app.downloads.length, 1);
   assert.equal(app.elements.message.classList.contains('error'), false);
-  assert.equal(app.elements['partial-export-dialog'].modalCount, 1);
+  assert.equal(app.elements['partial-export-dialog'], undefined);
+  assert.equal(app.elements['download-diagnostics'].hidden, false);
   assert.match(app.elements['file-results'].children[0].children[1].textContent, /не найден/);
   assert.equal(app.records.get(7).exportRevision, 42, 'Failure retains the complete capture for retry');
   assert.ok(app.requests.some(item => item.type === 'GET_EXPORT_RECORDS'));
@@ -812,7 +860,7 @@ test('hydrated records are checked again when summary looked ready but a retaine
   assert.match(app.elements.message.textContent, /не все|не полностью|частичный/i);
 });
 
-test('raw records cannot hide a file consent warning behind an empty cached summary inventory', async () => {
+test('raw records retain missing-file warnings despite an empty cached inventory', async () => {
   const state = finishedWorkspace();
   state.exportRevision = 74;
   state.assetInventory = [];
@@ -832,33 +880,35 @@ test('raw records cannot hide a file consent warning behind an empty cached summ
   await app.elements.export.click();
   await settle(); await app.refresh();
   assert.deepEqual(requested, ['https://cdn.example.org/missing-in-summary.png']);
-  assert.equal(app.downloads.length, 0);
-  assert.match(app.elements.message.textContent, /отменено/i);
-  assert.equal(app.elements['partial-export-dialog'].modalCount, 1);
+  assert.equal(app.downloads.length, 1);
+  assert.equal(app.elements['partial-export-dialog'], undefined);
+  assert.equal(app.elements['download-diagnostics'].hidden, false);
 });
 
 for (const status of ['failed', 'skipped', 'unavailable', 'empty-downloaded']) {
-  test(`a finished crawl cannot silently save missing media; failed downloads require consent: ${status}`, async () => {
+  test(`terminal file failures save automatically while invalid downloaded bytes still block: ${status}`, async () => {
     const state = finishedWorkspace();
     state.snapshots[1].assets = ['https://cdn.example.org/required.mp3'];
-    const app = await dashboard({ state, allowDownload: true, downloadFiles: async candidates => candidates.map(asset => ({ ...asset,
-      status: status === 'empty-downloaded' ? 'downloaded' : status,
-      ...(status === 'empty-downloaded' ? { data: new Blob() } : {}), error: 'Required file was not retained',
-    })) });
+    const app = await dashboard({ state, allowDownload: true, downloadFiles: async (candidates, options) => candidates.map(asset => {
+      options.onDiagnostic?.({ stage: 'files', assetId: asset.id, url: asset.url, status: status === 'empty-downloaded' ? 'downloaded' : status });
+      return { ...asset, status: status === 'empty-downloaded' ? 'downloaded' : status,
+        ...(status === 'empty-downloaded' ? { data: new Blob() } : {}), error: 'Required file was not retained' };
+    }) });
     const retained = structuredClone(app.records.get(7));
     await app.elements.export.click();
     await settle(); await app.refresh();
-    assert.equal(app.downloads.length, 0);
     const invalidDownloaded = status === 'empty-downloaded';
-    assert.match(app.elements.message.textContent, invalidDownloaded ? /все файлы|не создан/i : /отменено/i);
-    assert.equal(app.elements['partial-export-dialog'].modalCount, invalidDownloaded ? 0 : 1);
+    assert.equal(app.downloads.length, invalidDownloaded ? 0 : 1);
+    if (invalidDownloaded) assert.match(app.elements.message.textContent, /все файлы|не создан/i);
+    else assert.equal(app.elements['download-diagnostics'].hidden, false);
+    assert.equal(app.elements['partial-export-dialog'], undefined);
     assert.equal(app.elements.message.classList.contains('error'), invalidDownloaded);
     assert.equal(app.elements.export.disabled, false, 'Media can be retried without recollecting the source');
     assert.deepEqual(app.records.get(7), retained);
   });
 }
 
-test('temporary private file references cannot silently become an archive without that file', async () => {
+test('temporary private file references are recorded as missing in the saved archive', async () => {
   const state = finishedWorkspace();
   state.snapshots[1].assets = [{ url: 'https://cdn.example.org/required.mp3?token=secret', kind: 'audio' }];
   let fetched = false;
@@ -868,9 +918,9 @@ test('temporary private file references cannot silently become an archive withou
   await app.elements.export.click();
   await settle(); await app.refresh();
   assert.equal(fetched, false);
-  assert.equal(app.downloads.length, 0);
-  assert.match(app.elements.message.textContent, /отменено/i);
-  assert.equal(app.elements['partial-export-dialog'].modalCount, 1);
+  assert.equal(app.downloads.length, 1);
+  assert.equal(app.elements['partial-export-dialog'], undefined);
+  assert.equal(app.elements['download-diagnostics'].hidden, false);
   assert.equal(app.elements['without-files'], undefined);
 });
 
@@ -898,8 +948,34 @@ test('all required media permits a complete ZIP while supported external embeds 
   URL.revokeObjectURL(app.downloads[0].href);
 });
 
+for (const missing of [3, 20, 21]) {
+  test(`the dashboard automatically saves and offers the report with ${missing} missing media`, async () => {
+    const state = finishedWorkspace();
+    state.snapshots[1].assets = Array.from({ length: 21 }, (_, i) => `https://cdn.example.org/${i}.mp3`);
+    const app = await dashboard({ state, allowDownload: true, downloadFiles(candidates, options) {
+      return downloadMediaAssets(candidates, { ...options, fetchFile: async url => Number(new URL(url).pathname.slice(1).split('.')[0]) < missing
+        ? new Response('Denied', { status: 403 }) : new Response('ID3audio', { headers: { 'content-type': 'audio/mpeg' } }) });
+    } });
+    await app.elements.export.click(); await settle(); await app.refresh();
+    assert.equal(app.downloads.length, 1);
+    assert.equal(app.elements['partial-export-dialog'], undefined);
+    assert.equal(app.elements['download-diagnostics'].hidden, false);
+    assert.match(app.elements['capture-status'].textContent, /проблемами/);
+    const zip = new TextDecoder().decode(await (await fetch(app.downloads[0].href)).arrayBuffer());
+    assert.match(zip, new RegExp(`"missingAssets":${missing}`));
+    assert.match(zip, new RegExp(`"downloadedAssets":${21 - missing}`));
+    URL.revokeObjectURL(app.downloads[0].href);
+    await app.elements['download-diagnostics'].click(); await settle();
+    assert.equal(app.downloads.length, 2);
+    const report = await (await fetch(app.downloads[1].href)).json();
+    assert.equal(report.downloadSummary.failed, missing);
+    assert.equal(report.downloadSummary.total, 21);
+    URL.revokeObjectURL(app.downloads[1].href);
+  });
+}
+
 for (const declaredSize of [2, 7]) {
-  test(`a rejected truncated or mismatched media body requires consent to omit it: length=${declaredSize}`, async () => {
+  test(`a rejected truncated or mismatched media body is omitted and reported: length=${declaredSize}`, async () => {
     const state = finishedWorkspace();
     state.snapshots[1].assets = ['https://cdn.example.org/required.mp3'];
     const app = await dashboard({ state, allowDownload: true, downloadFiles(candidates, options) {
@@ -908,16 +984,16 @@ for (const declaredSize of [2, 7]) {
     } });
     await app.elements.export.click();
     await settle(); await app.refresh();
-    assert.equal(app.downloads.length, 0);
-    assert.match(app.elements.message.textContent, /отменено/i);
-    assert.equal(app.elements['partial-export-dialog'].modalCount, 1);
+    assert.equal(app.downloads.length, 1);
+    assert.equal(app.elements['partial-export-dialog'], undefined);
+    assert.equal(app.elements['download-diagnostics'].hidden, false);
     assert.match(app.elements['file-results'].children[0].children[1].textContent, /размер файла не совпадает/);
     assert.equal(app.records.get(7).collection.status, 'finished', 'Source data remains available for media retry');
   });
 }
 
 for (const status of [200, 206]) {
-  test(`a rejected range response requires consent before saving without that file: HTTP ${status}`, async () => {
+  test(`a rejected range response is omitted and reported: HTTP ${status}`, async () => {
     const state = finishedWorkspace();
     state.snapshots[1].assets = ['https://cdn.example.org/required.mp3'];
     let cancelled = false;
@@ -931,9 +1007,9 @@ for (const status of [200, 206]) {
     await app.elements.export.click();
     await settle(); await app.refresh();
     assert.equal(cancelled, true);
-    assert.equal(app.downloads.length, 0);
-    assert.match(app.elements.message.textContent, /отменено/i);
-    assert.equal(app.elements['partial-export-dialog'].modalCount, 1);
+    assert.equal(app.downloads.length, 1);
+    assert.equal(app.elements['partial-export-dialog'], undefined);
+    assert.equal(app.elements['download-diagnostics'].hidden, false);
     assert.match(app.elements['file-results'].children[0].children[1].textContent, /только часть файла/);
     assert.equal(app.elements.export.disabled, false, 'The complete file can be requested again');
     assert.deepEqual(app.records.get(7), retained);
